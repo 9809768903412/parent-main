@@ -370,6 +370,56 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
   }
 });
 
+router.post('/:id/roles', requireAdmin, async (req, res, next) => {
+  try {
+    const userId = Number(req.params.id);
+    const roleName = String(req.body.role || '').toUpperCase();
+    if (Number.isNaN(userId)) {
+      return res.status(400).json({ error: 'Invalid user id' });
+    }
+    if (!roleName) {
+      return res.status(400).json({ error: 'Role is required' });
+    }
+    const role = await prisma.role.upsert({
+      where: { roleName },
+      update: {},
+      create: { roleName },
+    });
+    const user = await prisma.user.findUnique({ where: { userId, deletedAt: null } });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    await prisma.userRole.upsert({
+      where: { userId_roleId: { userId, roleId: role.roleId } },
+      update: {},
+      create: { userId, roleId: role.roleId },
+    });
+    const updated = await prisma.user.findUnique({
+      where: { userId },
+      include: { role: true, userRoles: { include: { role: true } } },
+    });
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.userId,
+        action: 'UPDATE',
+        target: 'User',
+        details: `Admin granted ${roleName} to ${updated?.email}`,
+      },
+    });
+    res.json({
+      id: updated.userId.toString(),
+      name: updated.fullName,
+      email: updated.email,
+      role: updated.role?.roleName?.toLowerCase() || 'staff',
+      roles: updated.userRoles.map((ur) => ur.role?.roleName?.toLowerCase()).filter(Boolean),
+      status: updated.status,
+      phone: updated.phone || null,
+      avatarUrl: updated.avatarUrl || null,
+      proofDocUrl: updated.proofDocUrl || null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.put('/me/notifications', async (req, res, next) => {
   try {
     await prisma.user.update({

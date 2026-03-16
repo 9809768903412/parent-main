@@ -579,6 +579,25 @@ export default function SettingsPage() {
       });
   };
 
+  const handlePromoteToPm = (userId: string) => {
+    apiClient
+      .post(`/users/${userId}/roles`, { role: 'project_manager' })
+      .then((res) => {
+        setUsers(users.map((u) => (u.id === userId ? { ...u, ...res.data } : u)));
+        toast({
+          title: 'Promoted to PM',
+          description: 'User can now be assigned to projects.',
+        });
+      })
+      .catch(() => {
+        toast({
+          title: 'Promotion failed',
+          description: 'Please try again.',
+          variant: 'destructive',
+        });
+      });
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -965,7 +984,13 @@ export default function SettingsPage() {
                         </TableCell>
                       </TableRow>
                     ) : (
-                      filteredUsers.map((u) => (
+                      filteredUsers.map((u) => {
+                        const roleList = u.roles?.length ? u.roles : u.role ? [u.role] : [];
+                        const isPm = roleList.includes('project_manager');
+                        const promoteBlocked = roleList.some((role) =>
+                          ['admin', 'president', 'delivery_guy', 'client'].includes(role)
+                        );
+                        return (
                       <TableRow key={u.id}>
                         <TableCell>
                           <div className="flex items-center gap-3">
@@ -1025,19 +1050,31 @@ export default function SettingsPage() {
                               Restore
                             </Button>
                           ) : (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive"
-                              onClick={() => setConfirmDeactivate({ id: u.id, name: u.name })}
-                            >
-                              <Trash2 size={16} className="mr-1" />
-                              Archive
-                            </Button>
+                            <div className="flex items-center justify-end gap-2">
+                              {!isPm && !promoteBlocked && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handlePromoteToPm(u.id)}
+                                >
+                                  Promote to PM
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive"
+                                onClick={() => setConfirmDeactivate({ id: u.id, name: u.name })}
+                              >
+                                <Trash2 size={16} className="mr-1" />
+                                Archive
+                              </Button>
+                            </div>
                           )}
                         </TableCell>
                       </TableRow>
-                      ))
+                      );
+                      })
                     )}
                   </TableBody>
                 </Table>
