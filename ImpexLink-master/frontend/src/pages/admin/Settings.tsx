@@ -42,19 +42,6 @@ import { cn } from '@/lib/utils';
 import {
   ROLE_LABELS,
   canManageUsers,
-  canViewInventory,
-  canManageInventory,
-  canViewProjects,
-  canViewMaterialRequests,
-  canCreateMaterialRequests,
-  canApproveMaterialRequests,
-  canViewClientOrders,
-  canManageClientOrders,
-  canViewLogistics,
-  canManageLogistics,
-  canViewReports,
-  canViewAIInsights,
-  canViewAuditLogs,
   canViewCompanySettings,
 } from '@/lib/roles';
 
@@ -73,20 +60,6 @@ export default function SettingsPage() {
     { value: 'delivery_guy', label: 'Delivery Guy' },
     { value: 'client', label: 'Client' },
   ];
-  const permissionRows = roleOptions.map((role) => ({
-    role: role.label,
-    inventoryView: canViewInventory(role.value as any),
-    inventoryManage: canManageInventory(role.value as any),
-    projectsView: canViewProjects(role.value as any),
-    requestsCreate: canCreateMaterialRequests(role.value as any),
-    requestsApprove: canApproveMaterialRequests(role.value as any),
-    ordersManage: canManageClientOrders(role.value as any),
-    logisticsManage: canManageLogistics(role.value as any),
-    reportsView: canViewReports(role.value as any),
-    aiView: canViewAIInsights(role.value as any),
-    auditView: canViewAuditLogs(role.value as any),
-    usersManage: canManageUsers(role.value as any),
-  }));
   const [userView, setUserView] = useState<'active' | 'archived'>('active');
   const { data: users, setData: setUsers, reload: reloadUsers } = useResource<UserType[]>(
     '/users',
@@ -1078,52 +1051,6 @@ export default function SettingsPage() {
                     )}
                   </TableBody>
                 </Table>
-                <div className="p-4">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Role Permissions Matrix</CardTitle>
-                      <CardDescription>Snapshot of role-based access in the UI</CardDescription>
-                    </CardHeader>
-                    <CardContent className="p-0">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Role</TableHead>
-                            <TableHead>Inv View</TableHead>
-                            <TableHead>Inv Manage</TableHead>
-                            <TableHead>Projects</TableHead>
-                            <TableHead>Req Create</TableHead>
-                            <TableHead>Req Approve</TableHead>
-                            <TableHead>Orders</TableHead>
-                            <TableHead>Logistics</TableHead>
-                            <TableHead>Reports</TableHead>
-                            <TableHead>AI</TableHead>
-                            <TableHead>Audit</TableHead>
-                            <TableHead>Users</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {permissionRows.map((row) => (
-                            <TableRow key={row.role}>
-                              <TableCell className="font-medium">{row.role}</TableCell>
-                              <TableCell>{row.inventoryView ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.inventoryManage ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.projectsView ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.requestsCreate ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.requestsApprove ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.ordersManage ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.logisticsManage ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.reportsView ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.aiView ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.auditView ? '✓' : '—'}</TableCell>
-                              <TableCell>{row.usersManage ? '✓' : '—'}</TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </CardContent>
-                  </Card>
-                </div>
               </CardContent>
             </Card>
           </TabsContent>

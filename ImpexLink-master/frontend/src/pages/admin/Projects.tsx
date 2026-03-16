@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { format } from 'date-fns';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -28,6 +28,7 @@ import { apiClient } from '@/api/client';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth } from '@/contexts/AuthContext';
+import { useLocation } from 'react-router-dom';
 
 const statusColors = {
   pending: 'bg-yellow-100 text-yellow-800',
@@ -57,6 +58,7 @@ const mapProject = (project: any): Project => ({
 // TODO: Replace with real data
 export default function ProjectsPage() {
   const { user } = useAuth();
+  const location = useLocation();
   const roleInput = user?.roles?.length ? user.roles : user?.role;
   const isPresident = Array.isArray(roleInput) ? roleInput.includes('president') : roleInput === 'president';
   const isProjectManager = Array.isArray(roleInput) ? roleInput.includes('project_manager') : roleInput === 'project_manager';
@@ -90,6 +92,7 @@ export default function ProjectsPage() {
   const { data: clients } = useResource<Client[]>('/clients', []);
   const { data: orders } = useResource<Order[]>('/orders', []);
   const { data: deliveries } = useResource<Delivery[]>('/deliveries', []);
+  const { data: users, reload: reloadUsers } = useResource<UserType[]>('/users', []);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newProject, setNewProject] = useState({
@@ -338,8 +341,21 @@ export default function ProjectsPage() {
     setRejectError('');
   };
 
-  const AdminAssigneeSelect = ({ value, onChange }: { value: string; onChange: (value: string) => void }) => {
-    const { data: users } = useResource<UserType[]>('/users', []);
+  useEffect(() => {
+    if (location.pathname.startsWith('/admin/projects')) {
+      reloadUsers();
+    }
+  }, [location.pathname, reloadUsers]);
+
+  const AdminAssigneeSelect = ({
+    value,
+    onChange,
+    users,
+  }: {
+    value: string;
+    onChange: (value: string) => void;
+    users: UserType[];
+  }) => {
     const assignableUsers = users.filter((u) => {
       const roleList = u.roles?.length ? u.roles : u.role ? [u.role] : [];
       return roleList.includes('project_manager');
@@ -604,6 +620,7 @@ export default function ProjectsPage() {
                       <AdminAssigneeSelect
                         value={editProject.assignedPmId}
                         onChange={(value) => setEditProject((prev) => ({ ...prev, assignedPmId: value }))}
+                        users={users}
                       />
                     )}
                     <div>
