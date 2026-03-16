@@ -1,0 +1,30 @@
+{
+  "name": "impexlink",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "mobile": "expo start",
+    "backend": "cd backend && npm start",
+    "web": "cd frontend && npm run dev",
+    "dev": "concurrently \"npm run backend\" \"npm run web\" \"npm run mobile\"",
+    "build-web": "cd frontend && npm run build"
+  },
+  "dependencies": {
+    "@react-navigation/native": "^7.1.28",
+    "@react-navigation/native-stack": "^7.12.0",
+    "expo": "~54.0.33",
+    "expo-status-bar": "~3.0.9",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "^5.6.2",
+    "react-native-web": "^0.21.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "private": true
+}
