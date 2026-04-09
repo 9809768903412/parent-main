@@ -29,9 +29,7 @@ function requireAuth(req, res, next) {
 function requireRole(roles = []) {
   const allowed = roles.map((r) => String(r).toUpperCase());
   return (req, res, next) => {
-    const roleList = Array.isArray(req.user?.roles)
-      ? req.user.roles.map((r) => String(r).toUpperCase())
-      : [String(req.user?.role || '').toUpperCase()];
+    const roleList = getRoleList(req.user);
     const hasRole = roleList.some((role) => allowed.includes(role));
     if (!hasRole) {
       return res.status(403).json({ error: 'Forbidden' });
@@ -40,4 +38,16 @@ function requireRole(roles = []) {
   };
 }
 
-module.exports = { requireAuth, requireRole };
+function getRoleList(user) {
+  if (Array.isArray(user?.roles) && user.roles.length > 0) {
+    return user.roles.map((r) => String(r).toUpperCase());
+  }
+  return user?.role ? [String(user.role).toUpperCase()] : [];
+}
+
+function hasRole(user, roles = []) {
+  const allowed = roles.map((role) => String(role).toUpperCase());
+  return getRoleList(user).some((role) => allowed.includes(role));
+}
+
+module.exports = { requireAuth, requireRole, getRoleList, hasRole };

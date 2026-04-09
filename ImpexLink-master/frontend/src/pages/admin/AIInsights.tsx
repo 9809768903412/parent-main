@@ -397,9 +397,9 @@ export default function AIInsightsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Shield size={20} className="text-blue-600" />
-              Payment Fraud Detector
+              Purchase Order Match Monitor
             </CardTitle>
-            <CardDescription>AI cheque verification history</CardDescription>
+            <CardDescription>Purchase order matching alerts and verification history</CardDescription>
           </CardHeader>
           <CardContent>
             {fraudAlerts.length === 0 ? (
@@ -445,7 +445,7 @@ export default function AIInsightsPage() {
               </div>
             )}
             <p className="text-sm text-muted-foreground text-center mt-4">
-              * AI-powered cheque verification using image analysis
+              * Mocked PO-code matching against order numbers for now
             </p>
           </CardContent>
         </Card>

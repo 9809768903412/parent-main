@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const fsPromises = require('fs/promises');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -8,17 +9,22 @@ const prisma = require('../utils/prisma');
 const { requireAuth } = require('../middleware/auth');
 const { sendOtpEmail, sendVerificationEmail, sendPasswordResetEmail } = require('../utils/mailer');
 const crypto = require('crypto');
+const { resolveLinkedClient, inferCompanyNameFromUser } = require('../utils/clientVisibility');
 
 const router = express.Router();
 
-const proofDir = path.join(__dirname, '..', '..', 'uploads', 'proofs');
-if (!fs.existsSync(proofDir)) {
-  fs.mkdirSync(proofDir, { recursive: true });
+const liveProofDir = path.join(__dirname, '..', '..', 'uploads', 'proofs');
+const pendingProofDir = path.join(__dirname, '..', '..', 'storage', 'pending-proofs');
+if (!fs.existsSync(liveProofDir)) {
+  fs.mkdirSync(liveProofDir, { recursive: true });
+}
+if (!fs.existsSync(pendingProofDir)) {
+  fs.mkdirSync(pendingProofDir, { recursive: true });
 }
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, proofDir),
+    destination: (_req, _file, cb) => cb(null, pendingProofDir),
     filename: (_req, file, cb) => {
       const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
       cb(null, `${Date.now()}-${safeName}`);
@@ -43,6 +49,44 @@ function collectRoleNames(user, roleName) {
   return Array.from(new Set(names.map((r) => String(r).toUpperCase())));
 }
 
+function getPrimaryRoleName(user, fallbackRoleName) {
+  return collectRoleNames(user, fallbackRoleName)[0] || 'CLIENT';
+}
+
+async function removePendingProof(pendingPath) {
+  if (!pendingPath || !String(pendingPath).startsWith('/pending-proofs/')) return;
+  const filename = path.basename(String(pendingPath));
+  const absolutePath = path.join(pendingProofDir, filename);
+  try {
+    await fsPromises.unlink(absolutePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+async function promotePendingProof(pendingPath) {
+  if (!pendingPath) return null;
+  if (!String(pendingPath).startsWith('/pending-proofs/')) {
+    return pendingPath;
+  }
+  const filename = path.basename(String(pendingPath));
+  const sourcePath = path.join(pendingProofDir, filename);
+  const targetPath = path.join(liveProofDir, filename);
+
+  try {
+    await fsPromises.rename(sourcePath, targetPath);
+  } catch (error) {
+    if (error.code === 'EXDEV') {
+      await fsPromises.copyFile(sourcePath, targetPath);
+      await fsPromises.unlink(sourcePath);
+    } else if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  return `/uploads/proofs/${filename}`;
+}
+
 function buildUserResponse(user, roleName, client) {
   const initials = user.fullName
     .split(' ')
@@ -52,7 +96,7 @@ function buildUserResponse(user, roleName, client) {
     .slice(0, 2)
     .toUpperCase();
   const roles = collectRoleNames(user, roleName).map((r) => r.toLowerCase());
-  const primary = roles[0] || roleName || 'staff';
+  const primary = roles[0] || roleName || 'client';
 
   return {
     id: user.userId.toString(),
@@ -62,6 +106,7 @@ function buildUserResponse(user, roleName, client) {
     roles,
     companyName: client?.clientName || undefined,
     clientId: client?.clientId ? client.clientId.toString() : undefined,
+    clientVisibilityScope: client?.visibilityScope ? String(client.visibilityScope).toLowerCase() : undefined,
     avatar: initials,
     avatarUrl: user.avatarUrl || null,
     proofDocUrl: user.proofDocUrl || null,
@@ -74,9 +119,9 @@ async function ensureClientForUser(user) {
   if (!user) return null;
   const roles = collectRoleNames(user, user.role?.roleName || user.roleName);
   if (!roles.includes('CLIENT')) return null;
-  const existing = await prisma.client.findFirst({ where: { email: user.email } });
-  if (existing) return existing;
-  const clientName = user.fullName || user.email;
+  const linked = await resolveLinkedClient(prisma, user);
+  if (linked?.client) return linked.client;
+  const clientName = inferCompanyNameFromUser(user) || user.fullName || user.email;
   return prisma.client.create({
     data: {
       clientName,
@@ -120,7 +165,7 @@ router.post('/register', upload.single('proofDoc'), async (req, res, next) => {
     });
     if (existing) return res.status(409).json({ error: 'Email already in use' });
 
-    const proofDocUrl = req.file ? `/uploads/proofs/${req.file.filename}` : null;
+    const proofDocUrl = req.file ? `/pending-proofs/${req.file.filename}` : null;
     const passwordHash = await bcrypt.hash(password, 10);
     const verificationCode = String(crypto.randomInt(100000, 999999));
     const verificationCodeHash = await bcrypt.hash(verificationCode, 10);
@@ -129,11 +174,23 @@ router.post('/register', upload.single('proofDoc'), async (req, res, next) => {
     const existingPending = await prisma.pendingRegistration.findUnique({ where: { email } });
     if (existingPending) {
       if (existingPending.verificationExpiresAt && existingPending.verificationExpiresAt.getTime() < Date.now()) {
+        await removePendingProof(existingPending.proofDocUrl);
         await prisma.pendingRegistration.delete({ where: { email } });
       } else {
+        if (proofDocUrl && existingPending.proofDocUrl && existingPending.proofDocUrl !== proofDocUrl) {
+          await removePendingProof(existingPending.proofDocUrl);
+        }
         await prisma.pendingRegistration.update({
           where: { email },
-          data: { verificationCodeHash, verificationExpiresAt },
+          data: {
+            fullName: name,
+            passwordHash,
+            roleName: String(role).toUpperCase(),
+            companyName: companyName || null,
+            proofDocUrl: proofDocUrl ?? existingPending.proofDocUrl,
+            verificationCodeHash,
+            verificationExpiresAt,
+          },
         });
       }
     }
@@ -242,12 +299,12 @@ router.post('/login', async (req, res, next) => {
       return res.json({ requiresOtp: true, emailSent, devOtp });
     }
 
-    const client = (await ensureClientForUser(user)) || (await prisma.client.findFirst({ where: { email } }));
+    const client = await ensureClientForUser(user);
     const token = jwt.sign(
       {
         userId: user.userId,
-        role: user.role?.roleName || 'STAFF',
-        roles: collectRoleNames(user, user.role?.roleName || 'STAFF'),
+        role: getPrimaryRoleName(user, user.role?.roleName),
+        roles: collectRoleNames(user, user.role?.roleName),
       },
       process.env.JWT_SECRET || 'dev_secret',
       { expiresIn: '7d' }
@@ -356,6 +413,8 @@ router.post('/verify-email', async (req, res, next) => {
       create: { roleName: pending.roleName },
     });
 
+    const finalProofDocUrl = await promotePendingProof(pending.proofDocUrl);
+
     const createdUser = await prisma.user.create({
       data: {
         fullName: pending.fullName,
@@ -364,7 +423,7 @@ router.post('/verify-email', async (req, res, next) => {
         roleId: roleRecord.roleId,
         status: pending.roleName === 'CLIENT' ? 'INACTIVE' : 'ACTIVE',
         emailVerified: true,
-        proofDocUrl: pending.proofDocUrl,
+        proofDocUrl: finalProofDocUrl,
         notificationPrefs: { twoFactorEnabled: true },
       },
     });
@@ -543,12 +602,12 @@ router.post('/verify-otp', async (req, res, next) => {
       data: { otpCodeHash: null, otpExpiresAt: null },
     });
 
-    const client = (await ensureClientForUser(user)) || (await prisma.client.findFirst({ where: { email } }));
+    const client = await ensureClientForUser(user);
     const token = jwt.sign(
       {
         userId: user.userId,
-        role: user.role?.roleName || 'STAFF',
-        roles: collectRoleNames(user, user.role?.roleName || 'STAFF'),
+        role: getPrimaryRoleName(user, user.role?.roleName),
+        roles: collectRoleNames(user, user.role?.roleName),
       },
       process.env.JWT_SECRET || 'dev_secret',
       { expiresIn: '7d' }
@@ -571,7 +630,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
     });
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const client = (await ensureClientForUser(user)) || (await prisma.client.findFirst({ where: { email: user.email } }));
+    const client = await ensureClientForUser(user);
 
     return res.json(
       buildUserResponse(user, user.role?.roleName?.toLowerCase(), client)

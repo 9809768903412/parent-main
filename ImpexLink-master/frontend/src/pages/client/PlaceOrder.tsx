@@ -39,6 +39,12 @@ interface CartItem {
   quantity: number;
 }
 
+interface QuoteFormState {
+  customRequirements: string;
+  projectId: string;
+  attachmentName: string;
+}
+
 export default function PlaceOrderPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -67,12 +73,13 @@ export default function PlaceOrderPage() {
   const categoryList = categories.map((cat) => cat.categoryName);
 
   // Quote request form
-  const [quoteForm, setQuoteForm] = useState({
-    items: '',
+  const [quoteForm, setQuoteForm] = useState<QuoteFormState>({
     customRequirements: '',
     projectId: '',
+    attachmentName: '',
   });
   const [quoteErrors, setQuoteErrors] = useState<Record<string, string>>({});
+  const [quoteAttachment, setQuoteAttachment] = useState<File | null>(null);
   const [isProjectRequestOpen, setIsProjectRequestOpen] = useState(false);
   const [projectRequestName, setProjectRequestName] = useState('');
   const [projectRequestError, setProjectRequestError] = useState('');
@@ -135,6 +142,13 @@ export default function PlaceOrderPage() {
     const params = new URLSearchParams(location.search);
     if (params.get('requestProject') === '1') {
       setIsProjectRequestOpen(true);
+    }
+    if (params.get('quote') === '1') {
+      setIsQuoteModalOpen(true);
+    }
+    const categoryFromUrl = params.get('category');
+    if (categoryFromUrl) {
+      setCategoryFilter(categoryFromUrl);
     }
   }, [location.search]);
 
@@ -206,6 +220,16 @@ export default function PlaceOrderPage() {
       const next = prev.filter((ci) => ci.item.id !== itemId);
       persistCart(next);
       return next;
+    });
+  };
+
+  const clearCart = () => {
+    setCart([]);
+    persistCart([]);
+    setCartQtyInput({});
+    toast({
+      title: 'Cart cleared',
+      description: 'All items have been removed from your cart.',
     });
   };
 
@@ -326,7 +350,9 @@ export default function PlaceOrderPage() {
 
   const handleSubmitQuote = () => {
     const errors: Record<string, string> = {};
-    if (!quoteForm.items.trim()) errors.items = 'Items and quantities are required.';
+    if (!quoteAttachment && !quoteForm.attachmentName.trim()) {
+      errors.attachment = 'Please attach your purchase order or project file.';
+    }
     setQuoteErrors(errors);
     if (Object.keys(errors).length > 0) {
       toast({
@@ -336,23 +362,22 @@ export default function PlaceOrderPage() {
       });
       return;
     }
-    const items = quoteForm.items
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (items.length === 0) {
-      toast({
-        title: 'Missing items',
-        description: 'Please add at least one item.',
-        variant: 'destructive',
-      });
-      return;
-    }
     apiClient.post('/quote-requests', {
       clientId: user?.clientId,
       projectId: quoteForm.projectId || undefined,
-      items: items.map((name) => ({ name, quantity: 1 })),
-      customRequirements: quoteForm.customRequirements,
+      items: [
+        {
+          name: quoteForm.attachmentName || quoteAttachment?.name || 'Attached quotation request',
+          quantity: 1,
+          notes: 'Submitted through file attachment flow',
+        },
+      ],
+      customRequirements: [
+        quoteForm.customRequirements?.trim(),
+        `Attachment: ${quoteForm.attachmentName || quoteAttachment?.name || 'Provided by client'}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
     }).catch(() => {
       // keep optimistic UI
     });
@@ -361,7 +386,8 @@ export default function PlaceOrderPage() {
       description: 'Your quote request has been submitted. Expect a response within 24 hours.',
     });
     setIsQuoteModalOpen(false);
-    setQuoteForm({ items: '', customRequirements: '', projectId: '' });
+    setQuoteAttachment(null);
+    setQuoteForm({ customRequirements: '', projectId: '', attachmentName: '' });
   };
 
   const getStockBadge = (item: InventoryItem) => {
@@ -392,13 +418,12 @@ export default function PlaceOrderPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">Place Order</h1>
-          <p className="text-muted-foreground">Browse our catalog and build your order</p>
+          <h1 className="text-2xl font-bold">Catalog</h1>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => setIsQuoteModalOpen(true)} className="gap-2">
             <MessageSquare size={18} />
-            Request Quote
+            Request Quotation
           </Button>
           <Dialog open={isCartOpen} onOpenChange={setIsCartOpen}>
             <DialogTrigger asChild>
@@ -424,6 +449,14 @@ export default function PlaceOrderPage() {
                     : `${cart.length} item${cart.length > 1 ? 's' : ''} in your cart`}
                 </DialogDescription>
               </DialogHeader>
+
+              {cart.length > 0 ? (
+                <div className="flex justify-end">
+                  <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" onClick={clearCart}>
+                    Clear Cart
+                  </Button>
+                </div>
+              ) : null}
 
               <ScrollArea className="flex-1 -mx-6 px-6">
                 <div className="space-y-4 py-4">
@@ -637,29 +670,28 @@ export default function PlaceOrderPage() {
             const inCart = cart.find((ci) => ci.item.id === item.id);
 
             return (
-              <Card key={item.id} className="relative group hover:shadow-md transition-shadow">
-                <CardContent className="p-4">
-                  {/* Product image placeholder */}
-                  <div className="h-24 bg-muted rounded-lg flex items-center justify-center mb-3">
-                    <Package size={32} className="text-muted-foreground" />
+              <Card key={item.id} className="relative group h-full hover:shadow-md transition-shadow">
+                <CardContent className="flex h-full flex-col p-4">
+                  <div className="mb-3 flex h-24 items-center justify-center overflow-hidden rounded-lg border bg-white p-2">
+                    <div className="flex h-full w-full items-center justify-center rounded-xl bg-[#f7f1ed] text-muted-foreground">
+                      <Package size={32} className="text-muted-foreground" />
+                    </div>
                   </div>
 
-                  {/* Product info */}
-                  <div className="space-y-2">
-                    <h3 className="font-semibold line-clamp-2">{item.name}</h3>
-                    <p className="text-sm text-muted-foreground">{item.category}</p>
+                  <div className="flex flex-1 flex-col">
+                    <div className="space-y-2">
+                      <div className="min-h-[2rem]">
+                        {getStockBadge(item)}
+                      </div>
+                      <h3 className="min-h-[3.5rem] font-semibold leading-7 line-clamp-2">{item.name}</h3>
+                      <p className="min-h-[1.25rem] text-sm text-muted-foreground">{item.category}</p>
+                      <p className="text-lg font-bold text-primary">
+                        ₱{item.unitPrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                        <span className="text-sm font-normal text-muted-foreground"> / {item.unit}</span>
+                      </p>
+                    </div>
 
-                    {/* Stock badge */}
-                    {getStockBadge(item)}
-
-                    {/* Price */}
-                    <p className="text-lg font-bold text-primary">
-                      ₱{item.unitPrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
-                      <span className="text-sm font-normal text-muted-foreground"> / {item.unit}</span>
-                    </p>
-
-                    {/* Actions */}
-                    <div className="flex gap-2 pt-2">
+                    <div className="mt-auto flex gap-2 pt-4">
                       {item.status === 'out-of-stock' ? (
                         <Button
                           variant="outline"
@@ -693,7 +725,7 @@ export default function PlaceOrderPage() {
               <Card key={item.id} className="hover:shadow-md transition-shadow">
                 <CardContent className="p-4">
                   <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                    <div className="h-16 w-16 bg-muted rounded-lg flex items-center justify-center shrink-0">
+                    <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-[#fcfaf8] p-2">
                       <Package size={28} className="text-muted-foreground" />
                     </div>
                     <div className="flex-1 min-w-0 space-y-1">
@@ -748,10 +780,10 @@ export default function PlaceOrderPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <MessageSquare size={20} />
-              Request a Quote
+              Request Quotation
             </DialogTitle>
             <DialogDescription>
-              Need bulk pricing or custom items? Submit a quote request and we'll respond within 24 hours.
+              Attach your purchase order, bill of materials, or project brief and our team will review it within 24 hours.
             </DialogDescription>
           </DialogHeader>
 
@@ -775,29 +807,36 @@ export default function PlaceOrderPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="quoteItems">Items & Quantities</Label>
-              <Textarea
-                id="quoteItems"
-                placeholder="List items and quantities you need..."
-                value={quoteForm.items}
+              <Label htmlFor="quoteAttachment">Attachment</Label>
+              <Input
+                id="quoteAttachment"
+                type="file"
+                accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg"
                 onChange={(e) => {
-                  setQuoteForm((prev) => ({ ...prev, items: e.target.value }));
-                  if (quoteErrors.items) {
-                    setQuoteErrors((prev) => ({ ...prev, items: '' }));
+                  const file = e.target.files?.[0] || null;
+                  setQuoteAttachment(file);
+                  setQuoteForm((prev) => ({
+                    ...prev,
+                    attachmentName: file?.name || '',
+                  }));
+                  if (quoteErrors.attachment) {
+                    setQuoteErrors((prev) => ({ ...prev, attachment: '' }));
                   }
                 }}
-                rows={3}
               />
-              {quoteErrors.items && <p className="text-xs text-destructive">{quoteErrors.items}</p>}
+              {quoteForm.attachmentName && (
+                <p className="text-xs text-muted-foreground">Selected file: {quoteForm.attachmentName}</p>
+              )}
+              {quoteErrors.attachment && <p className="text-xs text-destructive">{quoteErrors.attachment}</p>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="quoteRequirements">Custom Requirements</Label>
+              <Label htmlFor="quoteRequirements">Custom Requirements / Extra Messages</Label>
               <Textarea
                 id="quoteRequirements"
-                placeholder="Any special requirements, delivery needs, etc."
+                placeholder="Tell us the scope, budget notes, delivery schedule, site condition, or anything else we should know."
                 value={quoteForm.customRequirements}
                 onChange={(e) => setQuoteForm((prev) => ({ ...prev, customRequirements: e.target.value }))}
-                rows={2}
+                rows={5}
               />
             </div>
           </div>

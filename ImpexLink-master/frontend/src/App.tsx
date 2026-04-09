@@ -24,7 +24,6 @@ import SettingsPage from "@/pages/admin/Settings";
 import ClientDashboard from "@/pages/client/Dashboard";
 import PlaceOrderPage from "@/pages/client/PlaceOrder";
 import MyOrdersPage from "@/pages/client/MyOrders";
-import TrackDeliveryPage from "@/pages/client/TrackDelivery";
 import ClientNotificationsPage from "@/pages/client/Notifications";
 import ClientProfilePage from "@/pages/client/Profile";
 import ClientProjectsPage from "@/pages/client/Projects";
@@ -106,7 +105,7 @@ function AppRoutes() {
       <Route path="/client/order" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><PlaceOrderPage /></ClientLayout></ProtectedRoute>} />
       <Route path="/client/orders" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><MyOrdersPage /></ClientLayout></ProtectedRoute>} />
       <Route path="/client/orders/:orderId" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><MyOrdersPage /></ClientLayout></ProtectedRoute>} />
-      <Route path="/client/deliveries" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><TrackDeliveryPage /></ClientLayout></ProtectedRoute>} />
+      <Route path="/client/deliveries" element={<ProtectedRoute allowedRoles={['client']}><Navigate to="/client/orders?tab=my-deliveries" replace /></ProtectedRoute>} />
       <Route path="/client/projects" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><ClientProjectsPage /></ClientLayout></ProtectedRoute>} />
       <Route path="/client/notifications" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><ClientNotificationsPage /></ClientLayout></ProtectedRoute>} />
       <Route path="/client/profile" element={<ProtectedRoute allowedRoles={['client']}><ClientLayout><ClientProfilePage /></ClientLayout></ProtectedRoute>} />

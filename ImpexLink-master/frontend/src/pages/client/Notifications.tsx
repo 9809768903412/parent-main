@@ -11,6 +11,7 @@ import {
   Truck,
   CreditCard,
   AlertTriangle,
+  FolderKanban,
   Check,
   CheckCheck,
   Trash2,
@@ -29,6 +30,7 @@ const typeIcons: Record<NotificationType, React.ReactNode> = {
   'payment-verified': <CreditCard className="text-green-600" size={20} />,
   'request-approval': <AlertTriangle className="text-orange-600" size={20} />,
   'quote-response': <ShoppingCart className="text-purple-600" size={20} />,
+  'project-update': <FolderKanban className="text-emerald-600" size={20} />,
   'ai-alert': <AlertTriangle className="text-primary" size={20} />,
 };
 
@@ -38,6 +40,7 @@ const clientNotificationTypes: NotificationType[] = [
   'delivery-update',
   'payment-verified',
   'quote-response',
+  'project-update',
   'low-stock',
 ];
 
@@ -224,7 +227,6 @@ export default function ClientNotificationsPage() {
         </TabsContent>
       </Tabs>
 
-      {/* Quick Info Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
@@ -267,9 +269,6 @@ export default function ClientNotificationsPage() {
         </Card>
       </div>
 
-      <p className="text-center text-sm text-muted-foreground">
-        * Notifications are stored locally in this demo. 
-      </p>
     </div>
   );
 }

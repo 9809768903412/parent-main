@@ -1,14 +1,87 @@
 const express = require('express');
+const fs = require('fs/promises');
+const path = require('path');
 const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse, parseSort } = require('../utils/pagination');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isNonEmptyString, isValidDateString, isPositiveInt } = require('../utils/validate');
+const { resolveLinkedClient, inferCompanyNameFromUser } = require('../utils/clientVisibility');
 
 const router = express.Router();
 router.use(requireAuth);
 
+const projectFormsFile = path.join(__dirname, '../../database/project-forms.json');
+
 const normalizeStatus = (value) =>
   value ? String(value).trim().toUpperCase().replace(/[-\s]+/g, '_') : undefined;
+
+const hasRole = (req, role) => getRoleList(req.user).includes(String(role).toUpperCase());
+
+async function readProjectForms() {
+  try {
+    const raw = await fs.readFile(projectFormsFile, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function getEngineerProjectIds(userId) {
+  const [requests, forms] = await Promise.all([
+    prisma.materialRequest.findMany({
+      where: {
+        requestedBy: Number(userId),
+        deletedAt: null,
+        projectId: { not: null },
+      },
+      select: { projectId: true },
+      distinct: ['projectId'],
+    }),
+    readProjectForms(),
+  ]);
+
+  const ids = new Set(
+    requests
+      .map((request) => request.projectId)
+      .filter((projectId) => Number.isFinite(projectId))
+      .map((projectId) => Number(projectId))
+  );
+
+  forms
+    .filter((form) => Number(form.createdBy) === Number(userId) && Number(form.projectId))
+    .forEach((form) => ids.add(Number(form.projectId)));
+
+  return [...ids];
+}
+
+async function buildProjectAccessFilter(req, options = {}) {
+  const { forPicker = false } = options;
+
+  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT')) return {};
+
+  if (hasRole(req, 'CLIENT')) {
+    const client = (await resolveLinkedClient(prisma, req.user.userId))?.client;
+    return client?.clientId ? { clientId: client.clientId } : { projectId: -1 };
+  }
+
+  const scopes = [];
+
+  if (hasRole(req, 'PROJECT_MANAGER')) {
+    scopes.push({ assignedPmId: req.user.userId });
+  }
+
+  if (hasRole(req, 'ENGINEER')) {
+    return {};
+  }
+
+  if (scopes.length === 0) {
+    return { projectId: -1 };
+  }
+
+  return scopes.length === 1 ? scopes[0] : { OR: scopes };
+}
 
 router.get('/', async (req, res, next) => {
   try {
@@ -21,27 +94,13 @@ router.get('/', async (req, res, next) => {
       ? req.user.roles.map((r) => String(r).toUpperCase())
       : [String(req.user?.role || '').toUpperCase()];
     const hasRole = (role) => roleList.includes(String(role).toUpperCase());
-    let clientId = req.query.clientId ? Number(req.query.clientId) : null;
-    let assignedPmId = req.query.assignedPmId ? Number(req.query.assignedPmId) : null;
-    if (hasRole('CLIENT')) {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (user?.email) {
-        const client = await prisma.client.findFirst({ where: { email: user.email } });
-        clientId = client?.clientId || null;
-        if (!clientId) {
-          const empty = [];
-          if (pagination) {
-            return res.json(buildPaginatedResponse(empty, 0, pagination.page, pagination.pageSize));
-          }
-          return res.json(empty);
-        }
-      }
-    }
-    if (hasRole('PROJECT_MANAGER') && !hasRole('ADMIN') && !hasRole('PRESIDENT') && !hasRole('ENGINEER')) {
-      assignedPmId = req.user.userId;
-    }
+    const clientId = req.query.clientId ? Number(req.query.clientId) : null;
+    const assignedPmId = req.query.assignedPmId ? Number(req.query.assignedPmId) : null;
+    const pickerMode = req.query.picker === 'true';
+    const accessFilter = await buildProjectAccessFilter(req, { forPicker: pickerMode });
     const where = {
       AND: [
+        accessFilter,
         onlyDeleted ? { deletedAt: { not: null } } : includeDeleted ? {} : { deletedAt: null },
         q
           ? {
@@ -52,8 +111,8 @@ router.get('/', async (req, res, next) => {
             }
           : {},
         status ? { status } : {},
-        clientId ? { clientId } : {},
-        assignedPmId ? { assignedPmId } : {},
+        clientId && (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT')) ? { clientId } : {},
+        assignedPmId && (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT')) ? { assignedPmId } : {},
       ],
     };
     const sort = parseSort(req.query, ['projectName', 'status', 'startDate']);
@@ -75,6 +134,7 @@ router.get('/', async (req, res, next) => {
       clientName: p.client?.clientName || 'Unassigned',
       assignedPmId: p.assignedPmId ? p.assignedPmId.toString() : null,
       assignedPmName: p.assignedPm?.fullName || null,
+      location: p.location || null,
       status: p.status.toLowerCase(),
       startDate: p.startDate ? p.startDate.toISOString().split('T')[0] : null,
       endDate: null,
@@ -89,7 +149,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, next) => {
+router.post('/', requireRole(['ADMIN', 'CLIENT']), async (req, res, next) => {
   try {
     const projectName = req.body.name || req.body.projectName;
     if (!isNonEmptyString(projectName)) return res.status(400).json({ error: 'Project name is required' });
@@ -111,21 +171,20 @@ router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, nex
         return res.status(400).json({ error: 'Invalid status' });
       }
     }
-    const roleList = Array.isArray(req.user?.roles)
-      ? req.user.roles.map((r) => String(r).toUpperCase())
-      : [String(req.user?.role || '').toUpperCase()];
-    const hasRole = (role) => roleList.includes(String(role).toUpperCase());
-    const role = String(req.user?.role || '').toUpperCase();
+    const roleList = getRoleList(req.user);
+    const userHasRole = (role) => roleList.includes(String(role).toUpperCase());
     let clientId = req.body.clientId ? Number(req.body.clientId) : null;
     let status = normalizeStatus(req.body.status || 'ACTIVE');
     let startDate = req.body.startDate ? new Date(req.body.startDate) : new Date();
     let assignedPmId = req.body.assignedPmId ? Number(req.body.assignedPmId) : null;
-    if (hasRole('CLIENT')) {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
+    let location = isNonEmptyString(req.body.location || '') ? String(req.body.location).trim() : null;
+    if (userHasRole('CLIENT')) {
+      const linked = await resolveLinkedClient(prisma, req.user.userId);
+      const user = linked?.user;
       if (!user?.email) return res.status(403).json({ error: 'Forbidden' });
-      let client = await prisma.client.findFirst({ where: { email: user.email } });
+      let client = linked?.client;
       if (!client) {
-        const inferredName = (req.body.companyName || req.body.clientName || user.fullName || user.email).toString();
+        const inferredName = (req.body.companyName || req.body.clientName || inferCompanyNameFromUser(user) || user.fullName || user.email).toString();
         client = await prisma.client.create({
           data: {
             clientName: inferredName,
@@ -138,12 +197,14 @@ router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, nex
       status = 'PENDING';
       startDate = null;
       assignedPmId = null;
+      location = null;
     }
 
     const project = await prisma.project.create({
       data: {
         projectName,
         clientId,
+        location,
         status,
         startDate,
         assignedPmId,
@@ -159,7 +220,7 @@ router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, nex
       },
     });
 
-    if (role === 'CLIENT') {
+    if (userHasRole('CLIENT')) {
       const admins = await prisma.user.findMany({
         where: { role: { roleName: 'ADMIN' }, deletedAt: null },
       });
@@ -196,17 +257,21 @@ router.put('/:id', requireRole(['ADMIN', 'PROJECT_MANAGER']), async (req, res, n
         return res.status(400).json({ error: 'Invalid status' });
       }
     }
+    const rawAssignedPmId = req.body.assignedPmId === 'unassigned' ? null : req.body.assignedPmId;
+    if (rawAssignedPmId !== undefined && rawAssignedPmId !== null && rawAssignedPmId !== '') {
+      if (!isPositiveInt(rawAssignedPmId)) {
+        return res.status(400).json({ error: 'Invalid assigned PM id' });
+      }
+    }
     const existing = await prisma.project.findUnique({
       where: { projectId: Number(req.params.id) },
     });
     if (!existing) {
       return res.status(404).json({ error: 'Project not found' });
     }
-    const roleList = Array.isArray(req.user?.roles)
-      ? req.user.roles.map((r) => String(r).toUpperCase())
-      : [String(req.user?.role || '').toUpperCase()];
-    const hasRole = (role) => roleList.includes(String(role).toUpperCase());
-    if (hasRole('PROJECT_MANAGER') && !hasRole('ADMIN')) {
+    const roleList = getRoleList(req.user);
+    const userHasRole = (role) => roleList.includes(String(role).toUpperCase());
+    if (userHasRole('PROJECT_MANAGER') && !userHasRole('ADMIN')) {
       if (!existing.assignedPmId || existing.assignedPmId !== req.user.userId) {
         return res.status(403).json({ error: 'Forbidden' });
       }
@@ -229,6 +294,10 @@ router.put('/:id', requireRole(['ADMIN', 'PROJECT_MANAGER']), async (req, res, n
         projectName: req.body.projectName,
         status: normalizeStatus(req.body.status),
         startDate: req.body.startDate ? new Date(req.body.startDate) : undefined,
+        location:
+          req.body.location !== undefined
+            ? String(req.body.location || '').trim() || null
+            : undefined,
         rejectionReason: req.body.rejectionReason || undefined,
         assignedPmId,
       },
@@ -296,9 +365,7 @@ router.put('/:id', requireRole(['ADMIN', 'PROJECT_MANAGER']), async (req, res, n
 router.post('/:id/resubmit', requireRole(['CLIENT']), async (req, res, next) => {
   try {
     const projectId = Number(req.params.id);
-    const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-    if (!user?.email) return res.status(403).json({ error: 'Forbidden' });
-    const client = await prisma.client.findFirst({ where: { email: user.email } });
+    const client = (await resolveLinkedClient(prisma, req.user.userId))?.client;
     if (!client) return res.status(400).json({ error: 'No client record found for this user.' });
     const existing = await prisma.project.findUnique({ where: { projectId } });
     if (!existing || existing.clientId !== client.clientId) {

@@ -7,7 +7,7 @@ const { isPositiveInt, isNonNegativeNumber, isNonEmptyString } = require('../uti
 const router = express.Router();
 router.use(requireAuth);
 
-router.get('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.get('/', requireRole(['ADMIN', 'WAREHOUSE_STAFF']), async (req, res, next) => {
   try {
     const pagination = parsePagination(req.query);
     const q = req.query.q ? String(req.query.q) : '';
@@ -134,7 +134,7 @@ router.post('/', requireRole(['ADMIN']), async (req, res, next) => {
   }
 });
 
-router.post('/auto', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.post('/auto', requireRole(['ADMIN', 'WAREHOUSE_STAFF']), async (req, res, next) => {
   try {
     const { items } = req.body;
     if (!Array.isArray(items)) return res.status(400).json({ error: 'Items required' });

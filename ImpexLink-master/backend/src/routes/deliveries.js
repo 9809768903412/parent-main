@@ -1,11 +1,145 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse, parseSort } = require('../utils/pagination');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isPositiveInt, isNonNegativeNumber, isValidDateString, isNonEmptyString } = require('../utils/validate');
+const {
+  resolveClientAccess,
+  buildNestedClientOrderScope,
+} = require('../utils/clientVisibility');
 
 const router = express.Router();
 router.use(requireAuth);
+
+const proofDir = path.join(__dirname, '..', '..', 'uploads', 'deliveries');
+if (!fs.existsSync(proofDir)) {
+  fs.mkdirSync(proofDir, { recursive: true });
+}
+
+const uploadProof = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, proofDir),
+    filename: (_req, file, cb) => {
+      const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+      cb(null, `${Date.now()}-${safeName}`);
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'application/pdf'];
+    if (!allowed.includes(file.mimetype)) {
+      return cb(new Error('Invalid file type'));
+    }
+    cb(null, true);
+  },
+});
+
+function hasRole(req, role) {
+  return getRoleList(req.user).includes(String(role).toUpperCase());
+}
+
+async function resolveDefaultDriverId() {
+  const driver = await prisma.user.findFirst({
+    where: {
+      deletedAt: null,
+      OR: [
+        { role: { roleName: 'DELIVERY_GUY' } },
+        { userRoles: { some: { role: { roleName: 'DELIVERY_GUY' } } } },
+      ],
+    },
+    orderBy: { userId: 'asc' },
+  });
+  return driver?.userId || null;
+}
+
+async function validateDriverAssignment(assignedDriverId) {
+  if (!assignedDriverId) return null;
+  const driver = await prisma.user.findUnique({
+    where: { userId: Number(assignedDriverId) },
+    include: { role: true, userRoles: { include: { role: true } } },
+  });
+  if (!driver || driver.deletedAt) {
+    throw new Error('Assigned driver not found');
+  }
+  const roleNames = [
+    driver.role?.roleName,
+    ...(driver.userRoles || []).map((entry) => entry.role?.roleName),
+  ]
+    .filter(Boolean)
+    .map((role) => String(role).toUpperCase());
+  if (!roleNames.includes('DELIVERY_GUY')) {
+    throw new Error('Assigned user must have the Delivery Guy role');
+  }
+  return driver.userId;
+}
+
+async function buildDeliveryScope(req) {
+  const roleList = getRoleList(req.user);
+  if (roleList.includes('ADMIN') || roleList.includes('PRESIDENT') || roleList.includes('WAREHOUSE_STAFF')) {
+    return {};
+  }
+
+  const scopes = [];
+
+  if (roleList.includes('CLIENT')) {
+    const access = await resolveClientAccess(prisma, req.user.userId);
+    if (access?.client?.clientId) {
+      scopes.push(buildNestedClientOrderScope(access));
+    }
+  }
+
+  if (roleList.includes('PROJECT_MANAGER')) {
+    scopes.push({ clientOrder: { project: { assignedPmId: req.user.userId } } });
+  }
+
+  if (roleList.includes('SALES_AGENT')) {
+    scopes.push({ clientOrder: { createdBy: req.user.userId } });
+  }
+
+  if (roleList.includes('DELIVERY_GUY')) {
+    scopes.push({ assignedDriverId: req.user.userId });
+  }
+
+  if (scopes.length === 0) {
+    return { deliveryId: -1 };
+  }
+
+  return scopes.length === 1 ? scopes[0] : { OR: scopes };
+}
+
+function mapDelivery(d) {
+  return {
+    id: d.deliveryId.toString(),
+    drNumber: d.drNumber,
+    orderId: d.clientOrderId?.toString() || null,
+    orderNumber: d.clientOrder?.orderNumber || '',
+    clientId: d.clientOrder?.clientId?.toString() || null,
+    clientName: d.clientOrder?.client?.clientName || 'Client',
+    projectName: d.clientOrder?.project?.projectName || null,
+    items: (d.clientOrder?.items || []).map((item) => ({
+      itemId: item.productId?.toString() || '',
+      itemName: item.product?.itemName || '',
+      unit: item.product?.unit || '',
+      quantity: item.quantity,
+      unitPrice: Number(item.unitPrice || 0),
+      amount: Number(item.unitPrice || 0) * item.quantity,
+    })),
+    status: d.status.toLowerCase().replace(/_/g, '-'),
+    eta: d.eta ? d.eta.toISOString() : null,
+    issuedBy: 'System',
+    issuedAt: d.createdAt.toISOString(),
+    receivedBy: d.receivedBy || null,
+    receivedAt: d.receivedAt ? d.receivedAt.toISOString() : null,
+    notes: d.notes || null,
+    returnRejectionReason: d.returnRejectionReason || null,
+    proofOfDelivery: d.proofOfDeliveryUrl || null,
+    assignedDriverId: d.assignedDriverId?.toString() || null,
+    driverName: d.assignedDriver?.fullName || null,
+  };
+}
 
 router.get('/', async (req, res, next) => {
   try {
@@ -15,16 +149,11 @@ router.get('/', async (req, res, next) => {
     const includeDeleted = req.query.includeDeleted === 'true';
     const onlyDeleted = req.query.onlyDeleted === 'true';
     let clientId = null;
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (user?.email) {
-        const client = await prisma.client.findFirst({ where: { email: user.email } });
-        clientId = client?.clientId || null;
-      }
-    }
+    const roleList = getRoleList(req.user);
+    const scopeWhere = await buildDeliveryScope(req);
     const where = {
       AND: [
+        scopeWhere,
         onlyDeleted ? { deletedAt: { not: null } } : includeDeleted ? {} : { deletedAt: null },
         q
           ? {
@@ -32,26 +161,30 @@ router.get('/', async (req, res, next) => {
                 { drNumber: { contains: q, mode: 'insensitive' } },
                 { clientOrder: { orderNumber: { contains: q, mode: 'insensitive' } } },
                 { clientOrder: { client: { clientName: { contains: q, mode: 'insensitive' } } } },
+                { assignedDriver: { fullName: { contains: q, mode: 'insensitive' } } },
               ],
             }
           : {},
         status ? { status } : {},
-        clientId ? { clientOrder: { clientId } } : {},
+        clientId && (roleList.includes('ADMIN') || roleList.includes('PRESIDENT') || roleList.includes('WAREHOUSE_STAFF'))
+          ? { clientOrder: { clientId } }
+          : {},
       ],
     };
     const sort = parseSort(req.query, ['createdAt', 'status', 'eta']);
     const orderBy = sort ? { [sort.sortBy]: sort.sortDir } : { createdAt: 'desc' };
     const [deliveries, total] = await Promise.all([
       prisma.delivery.findMany({
-      include: {
-        clientOrder: {
-          include: {
-            client: true,
-            project: true,
-            items: { include: { product: true } },
+        include: {
+          assignedDriver: true,
+          clientOrder: {
+            include: {
+              client: true,
+              project: true,
+              items: { include: { product: true } },
+            },
           },
         },
-      },
         where,
         skip: pagination ? (pagination.page - 1) * pagination.pageSize : undefined,
         take: pagination ? pagination.pageSize : undefined,
@@ -60,31 +193,7 @@ router.get('/', async (req, res, next) => {
       prisma.delivery.count({ where }),
     ]);
 
-    const data = deliveries.map((d) => ({
-      id: d.deliveryId.toString(),
-      drNumber: d.drNumber,
-      orderId: d.clientOrderId?.toString() || null,
-      orderNumber: d.clientOrder?.orderNumber || '',
-      clientId: d.clientOrder?.clientId?.toString() || null,
-      clientName: d.clientOrder?.client?.clientName || 'Client',
-      projectName: d.clientOrder?.project?.projectName || null,
-      items: (d.clientOrder?.items || []).map((item) => ({
-        itemId: item.productId?.toString() || '',
-        itemName: item.product?.itemName || '',
-        unit: item.product?.unit || '',
-        quantity: item.quantity,
-        unitPrice: Number(item.unitPrice || 0),
-        amount: Number(item.unitPrice || 0) * item.quantity,
-      })),
-      status: d.status.toLowerCase().replace(/_/g, '-'),
-      eta: d.eta ? d.eta.toISOString() : null,
-      issuedBy: 'System',
-      issuedAt: d.createdAt.toISOString(),
-      receivedBy: d.receivedBy || null,
-      receivedAt: d.receivedAt ? d.receivedAt.toISOString() : null,
-      notes: d.notes || null,
-      returnRejectionReason: d.returnRejectionReason || null,
-    }));
+    const data = deliveries.map(mapDelivery);
 
     if (pagination) {
       return res.json(buildPaginatedResponse(data, total, pagination.page, pagination.pageSize));
@@ -95,7 +204,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.post('/', requireRole(['ADMIN', 'WAREHOUSE_STAFF']), async (req, res, next) => {
   try {
     const { drNumber, clientOrderId, status, eta, itemsCount } = req.body;
     if (!isNonEmptyString(drNumber)) return res.status(400).json({ error: 'DR number is required' });
@@ -108,20 +217,26 @@ router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
     }
     if (status) {
       const s = status.toUpperCase().replace('-', '_');
-      if (!['PENDING', 'IN_TRANSIT', 'DELIVERED', 'RETURN_PENDING', 'RETURN_REJECTED', 'RETURNED'].includes(s)) {
+      if (!['PENDING', 'IN_TRANSIT', 'DELIVERED', 'RETURN_PENDING', 'RETURN_REJECTED', 'RETURNED', 'DELAYED'].includes(s)) {
         return res.status(400).json({ error: 'Invalid status' });
       }
     }
 
     const defaultEta = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const requestedDriverId = req.body.assignedDriverId === 'unassigned' ? null : req.body.assignedDriverId;
+    const assignedDriverId = requestedDriverId
+      ? await validateDriverAssignment(requestedDriverId)
+      : await resolveDefaultDriverId();
     const delivery = await prisma.delivery.create({
       data: {
         drNumber,
-        clientOrderId: clientOrderId ? Number(clientOrderId) : null,
+        clientOrderId: Number(clientOrderId),
+        assignedDriverId,
         status: status ? status.toUpperCase().replace('-', '_') : 'PENDING',
         eta: eta ? new Date(eta) : defaultEta,
         itemsCount,
       },
+      include: { assignedDriver: true, clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } } },
     });
 
     await prisma.auditLog.create({
@@ -133,17 +248,20 @@ router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
       },
     });
 
-    res.status(201).json(delivery);
+    res.status(201).json(mapDelivery(delivery));
   } catch (err) {
+    if (err.message?.includes('Assigned')) {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
 
-router.put('/:id', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.put('/:id', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), async (req, res, next) => {
   try {
     if (req.body.status) {
-      const s = req.body.status.toUpperCase().replace('-', '_');
-      if (!['PENDING', 'IN_TRANSIT', 'DELIVERED', 'RETURN_PENDING', 'RETURN_REJECTED', 'RETURNED'].includes(s)) {
+      const s = req.body.status.toUpperCase().replace(/[-\s]+/g, '_');
+      if (!['PENDING', 'IN_TRANSIT', 'DELIVERED', 'RETURN_PENDING', 'RETURN_REJECTED', 'RETURNED', 'DELAYED'].includes(s)) {
         return res.status(400).json({ error: 'Invalid status' });
       }
     }
@@ -153,21 +271,33 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
     if (req.body.receivedBy !== undefined && !isNonEmptyString(req.body.receivedBy)) {
       return res.status(400).json({ error: 'Received by is required' });
     }
+
     const existing = await prisma.delivery.findUnique({
       where: { deliveryId: Number(req.params.id) },
       include: {
-        clientOrder: { include: { items: { include: { product: true } }, project: true } },
+        assignedDriver: true,
+        clientOrder: { include: { client: true, items: { include: { product: true } }, project: true } },
       },
     });
     if (!existing) return res.status(404).json({ error: 'Delivery not found' });
+
+    if (hasRole(req, 'DELIVERY_GUY') && !hasRole(req, 'ADMIN')) {
+      if (!existing.assignedDriverId || existing.assignedDriverId !== req.user.userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      if (req.body.assignedDriverId !== undefined) {
+        return res.status(403).json({ error: 'Assigned driver can only be changed by admin or warehouse staff' });
+      }
+    }
+
     const currentStatus = existing.status;
-    const requestedStatus = req.body.status ? req.body.status.toUpperCase().replace('-', '_') : null;
+    const requestedStatus = req.body.status ? req.body.status.toUpperCase().replace(/[-\s]+/g, '_') : null;
     if (requestedStatus) {
       const allowed =
-        (currentStatus === 'PENDING' && requestedStatus === 'IN_TRANSIT') ||
-        (currentStatus === 'IN_TRANSIT' && requestedStatus === 'DELIVERED') ||
+        (currentStatus === 'PENDING' && ['IN_TRANSIT', 'DELAYED'].includes(requestedStatus)) ||
+        ((currentStatus === 'IN_TRANSIT' || currentStatus === 'DELAYED') && ['DELIVERED', 'DELAYED'].includes(requestedStatus)) ||
         (currentStatus === 'DELIVERED' && requestedStatus === 'RETURN_PENDING') ||
-        (currentStatus === 'RETURN_PENDING' && (requestedStatus === 'RETURNED' || requestedStatus === 'RETURN_REJECTED'));
+        (currentStatus === 'RETURN_PENDING' && ['RETURNED', 'RETURN_REJECTED'].includes(requestedStatus));
       if (!allowed) {
         return res.status(400).json({ error: `Invalid status transition: ${currentStatus} -> ${requestedStatus}` });
       }
@@ -184,14 +314,28 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
         return res.status(400).json({ error: 'Return rejection reason is required' });
       }
     }
+
+    let assignedDriverId = undefined;
+    if (req.body.assignedDriverId !== undefined) {
+      const requestedDriverId = req.body.assignedDriverId === 'unassigned' ? null : req.body.assignedDriverId;
+      assignedDriverId = requestedDriverId ? await validateDriverAssignment(requestedDriverId) : null;
+    }
+
     const delivery = await prisma.delivery.update({
       where: { deliveryId: Number(req.params.id) },
       data: {
+        assignedDriverId,
         status: requestedStatus || undefined,
+        eta: req.body.eta ? new Date(req.body.eta) : undefined,
         receivedBy: req.body.receivedBy,
-        receivedAt: req.body.receivedAt ? new Date(req.body.receivedAt) : undefined,
+        receivedAt: req.body.receivedAt ? new Date(req.body.receivedAt) : requestedStatus === 'DELIVERED' ? new Date() : undefined,
         notes: req.body.notes,
+        proofOfDeliveryUrl: req.body.proofOfDelivery || undefined,
         returnRejectionReason: req.body.returnRejectionReason,
+      },
+      include: {
+        assignedDriver: true,
+        clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } },
       },
     });
 
@@ -210,23 +354,17 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
         });
       }
     }
-    if (
-      updatedStatus === 'RETURNED' &&
-      existing &&
-      existing.status === 'RETURN_PENDING' &&
-      existing.clientOrder?.items?.length
-    ) {
+
+    if (updatedStatus === 'RETURNED' && existing.status === 'RETURN_PENDING' && existing.clientOrder?.items?.length) {
       for (const item of existing.clientOrder.items) {
         if (!item.productId) continue;
-        const product = await prisma.product.findUnique({
-          where: { productId: item.productId },
-        });
+        const product = await prisma.product.findUnique({ where: { productId: item.productId } });
         if (!product) continue;
         const newBalance = product.qtyOnHand + item.quantity;
-        const status = newBalance <= 0 ? 'OUT_OF_STOCK' : newBalance <= product.lowStockThreshold ? 'LOW_STOCK' : 'AVAILABLE';
+        const statusValue = newBalance <= 0 ? 'OUT_OF_STOCK' : newBalance <= product.lowStockThreshold ? 'LOW_STOCK' : 'AVAILABLE';
         await prisma.product.update({
           where: { productId: product.productId },
-          data: { qtyOnHand: newBalance, status },
+          data: { qtyOnHand: newBalance, status: statusValue },
         });
         await prisma.stockTransaction.create({
           data: {
@@ -279,44 +417,15 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
               link: '/client/deliveries',
             },
           });
-          await prisma.auditLog.create({
-            data: {
-              userId: req.user.userId,
-              action: 'NOTIFY',
-              target: 'Notification',
-              details: `Sent delivery update for ${delivery.drNumber} to client`,
-            },
-          });
         }
       }
     }
 
-    // Notify client on delivery updates
-    if (existing?.clientOrder?.client?.email) {
-      const clientUser = await prisma.user.findUnique({ where: { email: existing.clientOrder.client.email } });
-      if (clientUser) {
-        await prisma.notification.create({
-          data: {
-            userId: clientUser.userId,
-            type: 'DELIVERY_UPDATE',
-            title: 'Delivery update',
-            message: `Delivery ${delivery.drNumber} status is now ${delivery.status.toLowerCase().replace(/_/g, ' ')}.`,
-            link: '/client/deliveries',
-          },
-        });
-        await prisma.auditLog.create({
-          data: {
-            userId: req.user.userId,
-            action: 'NOTIFY',
-            target: 'Notification',
-            details: `Sent delivery update for ${delivery.drNumber} to client`,
-          },
-        });
-      }
-    }
-
-    res.json(delivery);
+    res.json(mapDelivery(delivery));
   } catch (err) {
+    if (err.message?.includes('Assigned')) {
+      return res.status(400).json({ error: err.message });
+    }
     next(err);
   }
 });
@@ -328,16 +437,13 @@ router.post('/:id/confirm', requireRole(['CLIENT']), async (req, res, next) => {
       include: { clientOrder: { include: { client: true, items: { include: { product: true } } } } },
     });
     if (!delivery) return res.status(404).json({ error: 'Delivery not found' });
-    if (delivery.status !== 'IN_TRANSIT') {
-      return res.status(400).json({ error: 'Only in-transit deliveries can be confirmed.' });
+    if (delivery.status !== 'IN_TRANSIT' && delivery.status !== 'DELAYED') {
+      return res.status(400).json({ error: 'Only active deliveries can be confirmed.' });
     }
-    const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-    const client = user?.email
-      ? await prisma.client.findFirst({ where: { email: user.email } })
-      : null;
-    const ownsByClient = client && delivery.clientOrder?.clientId === client.clientId;
+    const access = await resolveClientAccess(prisma, req.user.userId);
+    const ownsByClient = access?.client && delivery.clientOrder?.clientId === access.client.clientId;
     const ownsByCreator = delivery.clientOrder?.createdBy === req.user.userId;
-    if (!ownsByClient && !ownsByCreator) return res.status(403).json({ error: 'Forbidden' });
+    if (!ownsByClient || (access?.isUserScoped && !ownsByCreator)) return res.status(403).json({ error: 'Forbidden' });
 
     const receivedBy = req.body.receivedBy;
     if (!isNonEmptyString(receivedBy)) {
@@ -379,13 +485,10 @@ router.post('/:id/return', requireRole(['CLIENT']), async (req, res, next) => {
     if (delivery.status !== 'DELIVERED') {
       return res.status(400).json({ error: 'Only delivered items can be returned.' });
     }
-    const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-    const client = user?.email
-      ? await prisma.client.findFirst({ where: { email: user.email } })
-      : null;
-    const ownsByClient = client && delivery.clientOrder?.clientId === client.clientId;
+    const access = await resolveClientAccess(prisma, req.user.userId);
+    const ownsByClient = access?.client && delivery.clientOrder?.clientId === access.client.clientId;
     const ownsByCreator = delivery.clientOrder?.createdBy === req.user.userId;
-    if (!ownsByClient && !ownsByCreator) return res.status(403).json({ error: 'Forbidden' });
+    if (!ownsByClient || (access?.isUserScoped && !ownsByCreator)) return res.status(403).json({ error: 'Forbidden' });
     if (!isNonEmptyString(req.body.reason)) {
       return res.status(400).json({ error: 'Return reason is required' });
     }
@@ -405,7 +508,7 @@ router.post('/:id/return', requireRole(['CLIENT']), async (req, res, next) => {
       await prisma.notification.createMany({
         data: admins.map((admin) => ({
           userId: admin.userId,
-          type: 'RETURN_REQUEST',
+          type: 'DELIVERY_UPDATE',
           title: 'Return requested',
           message: `Return requested for ${updated.drNumber}. Reason: ${req.body.reason}`,
           link: '/admin/logistics',
@@ -423,6 +526,47 @@ router.post('/:id/return', requireRole(['CLIENT']), async (req, res, next) => {
     });
 
     res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+router.post('/:id/proof', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), uploadProof.single('proof'), async (req, res, next) => {
+  try {
+    const existing = await prisma.delivery.findUnique({
+      where: { deliveryId: Number(req.params.id) },
+    });
+    if (!existing) return res.status(404).json({ error: 'Delivery not found' });
+    if (hasRole(req, 'DELIVERY_GUY') && !hasRole(req, 'ADMIN')) {
+      if (!existing.assignedDriverId || existing.assignedDriverId !== req.user.userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'Proof file is required' });
+    }
+
+    const proofPath = `/uploads/deliveries/${req.file.filename}`;
+    const delivery = await prisma.delivery.update({
+      where: { deliveryId: existing.deliveryId },
+      data: { proofOfDeliveryUrl: proofPath },
+      include: {
+        assignedDriver: true,
+        clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.userId,
+        action: 'UPDATE',
+        target: 'Delivery',
+        details: `Uploaded proof of delivery for ${delivery.drNumber}`,
+      },
+    });
+
+    res.json(mapDelivery(delivery));
   } catch (err) {
     next(err);
   }

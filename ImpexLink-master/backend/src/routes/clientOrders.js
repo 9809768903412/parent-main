@@ -4,11 +4,83 @@ const fs = require('fs');
 const multer = require('multer');
 const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse, parseSort } = require('../utils/pagination');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isNonNegativeNumber, isPositiveInt } = require('../utils/validate');
+const {
+  resolveClientAccess,
+  buildClientOrderScope,
+  canAccessClientOwnedRecord,
+} = require('../utils/clientVisibility');
 
 const router = express.Router();
 router.use(requireAuth);
+
+function hasRole(req, role) {
+  return getRoleList(req.user).includes(String(role).toUpperCase());
+}
+
+async function buildOrderRoleScope(req) {
+  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT') || hasRole(req, 'ENGINEER')) {
+    return {};
+  }
+
+  const scopes = [];
+
+  if (hasRole(req, 'CLIENT')) {
+    const access = await resolveClientAccess(prisma, req.user.userId);
+    if (access?.user?.email) {
+      let client = access.client;
+      if (!client) {
+        const user = access.user;
+        const clientName = user.fullName || user.email;
+        client = await prisma.client.create({
+          data: {
+            clientName,
+            email: user.email,
+            contactPerson: user.fullName || clientName,
+          },
+        });
+      }
+      if (client?.clientId) {
+        const nextAccess = {
+          user: access.user,
+          client,
+          visibilityScope: access?.visibilityScope || 'COMPANY',
+          isUserScoped: access?.isUserScoped || false,
+        };
+        scopes.push(buildClientOrderScope(nextAccess));
+      }
+    }
+  }
+
+  if (hasRole(req, 'SALES_AGENT')) {
+    scopes.push({ createdBy: req.user.userId });
+  }
+
+  if (hasRole(req, 'PROJECT_MANAGER')) {
+    scopes.push({ project: { assignedPmId: req.user.userId } });
+  }
+
+  if (scopes.length === 0) {
+    return { clientOrderId: -1 };
+  }
+
+  return scopes.length === 1 ? scopes[0] : { OR: scopes };
+}
+
+async function resolveDefaultDriverId() {
+  const driver = await prisma.user.findFirst({
+    where: {
+      deletedAt: null,
+      OR: [
+        { role: { roleName: 'DELIVERY_GUY' } },
+        { userRoles: { some: { role: { roleName: 'DELIVERY_GUY' } } } },
+      ],
+    },
+    orderBy: { userId: 'asc' },
+  });
+  return driver?.userId || null;
+}
 
 const paymentDir = path.join(__dirname, '..', '..', 'uploads', 'payments');
 if (!fs.existsSync(paymentDir)) {
@@ -48,35 +120,16 @@ router.get('/', async (req, res, next) => {
     const status = req.query.status ? String(req.query.status).toUpperCase() : '';
     const includeDeleted = req.query.includeDeleted === 'true';
     const onlyDeleted = req.query.onlyDeleted === 'true';
-    let clientId = req.query.clientId ? Number(req.query.clientId) : null;
+    const roleList = Array.isArray(req.user?.roles)
+      ? req.user.roles.map((r) => String(r).toUpperCase())
+      : [String(req.user?.role || '').toUpperCase()];
+    const clientId = req.query.clientId ? Number(req.query.clientId) : null;
     const clientName = req.query.clientName ? String(req.query.clientName) : '';
     const createdBy = req.query.createdBy ? Number(req.query.createdBy) : null;
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (user?.email) {
-        let client = await prisma.client.findFirst({ where: { email: user.email } });
-        if (!client) {
-          const clientName = user.fullName || user.email;
-          client = await prisma.client.create({
-            data: {
-              clientName,
-              email: user.email,
-              contactPerson: user.fullName || clientName,
-            },
-          });
-        }
-        clientId = client?.clientId || null;
-        if (!clientId) {
-          if (pagination) {
-            return res.json(buildPaginatedResponse([], 0, pagination.page, pagination.pageSize));
-          }
-          return res.json([]);
-        }
-      }
-    }
+    const scopeWhere = await buildOrderRoleScope(req);
     const where = {
       AND: [
+        scopeWhere,
         onlyDeleted ? { deletedAt: { not: null } } : includeDeleted ? {} : { deletedAt: null },
         q
           ? {
@@ -87,9 +140,9 @@ router.get('/', async (req, res, next) => {
             }
           : {},
         status ? { status } : {},
-        clientId ? { clientId } : {},
+        clientId && (roleList.includes('ADMIN') || roleList.includes('PRESIDENT')) ? { clientId } : {},
         clientName ? { client: { clientName: { contains: clientName, mode: 'insensitive' } } } : {},
-        createdBy ? { createdBy } : {},
+        createdBy && (roleList.includes('ADMIN') || roleList.includes('PRESIDENT')) ? { createdBy } : {},
       ],
     };
     const sort = parseSort(req.query, ['createdAt', 'total', 'status']);
@@ -131,6 +184,8 @@ router.get('/', async (req, res, next) => {
       paymentStatus: o.paymentStatus.toLowerCase(),
       chequeImage: o.paymentProofUrl || null,
       chequeVerification: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
+      poDocumentUrl: o.paymentProofUrl || null,
+      poMatchStatus: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
       createdAt: o.createdAt.toISOString(),
       updatedAt: o.updatedAt.toISOString(),
       createdBy: o.createdBy?.toString() || null,
@@ -147,7 +202,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, next) => {
+router.post('/', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, res, next) => {
   try {
     const { orderNumber, clientId, projectId, items, subtotal, vat, total, status, paymentStatus, specialInstructions, cancelReason } = req.body;
     if (!orderNumber) return res.status(400).json({ error: 'Order number is required' });
@@ -173,13 +228,9 @@ router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, nex
       return res.status(400).json({ error: 'Invalid project id' });
     }
     let resolvedClientId = clientId ? Number(clientId) : null;
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (user?.email) {
-        const client = await prisma.client.findFirst({ where: { email: user.email } });
-        resolvedClientId = client?.clientId || null;
-      }
+    if (hasRole(req, 'CLIENT')) {
+      const access = await resolveClientAccess(prisma, req.user.userId);
+      resolvedClientId = access?.client?.clientId || null;
     }
 
     const order = await prisma.clientOrder.create({
@@ -247,11 +298,10 @@ router.post('/', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, nex
   }
 });
 
-router.put('/:id', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, next) => {
+router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, res, next) => {
   try {
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
+    if (hasRole(req, 'CLIENT')) {
+      const access = await resolveClientAccess(prisma, req.user.userId);
       const order = await prisma.clientOrder.findUnique({
         where: { clientOrderId: Number(req.params.id) },
         include: { client: true },
@@ -259,12 +309,7 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, n
       if (!order) {
         return res.status(404).json({ error: 'Order not found' });
       }
-      const client = user?.email
-        ? await prisma.client.findFirst({ where: { email: user.email } })
-        : null;
-      const ownsByClient = client && order.clientId === client.clientId;
-      const ownsByCreator = order.createdBy === req.user.userId;
-      if (!ownsByClient && !ownsByCreator) {
+      if (!canAccessClientOwnedRecord(access, order)) {
         return res.status(403).json({ error: 'Forbidden' });
       }
       if (!req.body.paymentStatus) {
@@ -305,6 +350,18 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, n
       });
 
       return res.json(updated);
+    }
+
+    if (hasRole(req, 'SALES_AGENT') && !hasRole(req, 'ADMIN')) {
+      const scopedOrder = await prisma.clientOrder.findUnique({
+        where: { clientOrderId: Number(req.params.id) },
+      });
+      if (!scopedOrder) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+      if (scopedOrder.createdBy !== req.user.userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
     }
 
     const status = req.body.status ? req.body.status.toUpperCase() : undefined;
@@ -396,6 +453,7 @@ router.put('/:id', requireRole(['ADMIN', 'STAFF', 'CLIENT']), async (req, res, n
           data: {
             drNumber,
             clientOrderId: order.clientOrderId,
+            assignedDriverId: await resolveDefaultDriverId(),
             status: nextStatus === 'SHIPPED' ? 'IN_TRANSIT' : 'PENDING',
             itemsCount: existing.items?.length || 0,
             eta: defaultEta,
@@ -477,29 +535,31 @@ router.post('/:id/payment-proof', requireRole(['CLIENT']), upload.single('proof'
   try {
     const allowTest = process.env.ALLOW_TEST_VERIFICATION === 'true';
     const isTest = String(req.headers['x-test-verification'] || '').toLowerCase() === 'true';
+    const poCode = String(req.body?.poCode || '').trim();
     if (!req.file && !(allowTest && isTest)) {
-      return res.status(400).json({ error: 'Payment proof is required' });
+      return res.status(400).json({ error: 'Purchase order file is required' });
     }
-    const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
+    if (!poCode) {
+      return res.status(400).json({ error: 'Purchase order code is required' });
+    }
+    const access = await resolveClientAccess(prisma, req.user.userId);
     const order = await prisma.clientOrder.findUnique({
       where: { clientOrderId: Number(req.params.id) },
     });
     if (!order) return res.status(404).json({ error: 'Order not found' });
-    const client = user?.email
-      ? await prisma.client.findFirst({ where: { email: user.email } })
-      : null;
-    const ownsByClient = client && order.clientId === client.clientId;
-    const ownsByCreator = order.createdBy === req.user.userId;
-    if (!ownsByClient && !ownsByCreator) {
+    if (!canAccessClientOwnedRecord(access, order)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
     const paymentProofUrl = req.file ? `/uploads/payments/${req.file.filename}` : null;
+    const normalizedPoCode = poCode.toUpperCase();
+    const expectedCode = String(order.orderNumber || '').toUpperCase();
+    const isMatched = isTest || normalizedPoCode === expectedCode;
     const updated = await prisma.clientOrder.update({
       where: { clientOrderId: Number(req.params.id) },
       data: {
         paymentProofUrl,
-        paymentStatus: isTest ? 'VERIFIED' : 'PENDING',
-        chequeVerification: isTest ? 'genuine' : 'pending',
+        paymentStatus: isMatched ? 'VERIFIED' : 'PENDING',
+        chequeVerification: isMatched ? 'genuine' : 'fraud',
       },
     });
 
@@ -511,8 +571,10 @@ router.post('/:id/payment-proof', requireRole(['CLIENT']), upload.single('proof'
         data: admins.map((admin) => ({
           userId: admin.userId,
           type: 'PAYMENT_VERIFIED',
-          title: 'Payment proof uploaded',
-          message: `Client uploaded payment proof for ${updated.orderNumber}.`,
+          title: isMatched ? 'Purchase order matched' : 'Purchase order mismatch detected',
+          message: isMatched
+            ? `Client uploaded a matching purchase order for ${updated.orderNumber}.`
+            : `Client uploaded a purchase order that did not match ${updated.orderNumber}.`,
           link: '/admin/orders',
         })),
       });
@@ -529,22 +591,18 @@ router.post('/:id/payment-proof', requireRole(['CLIENT']), upload.single('proof'
     await prisma.auditLog.create({
       data: {
         userId: req.user.userId,
-        action: isTest ? 'TEST' : 'VERIFY',
-        target: 'PaymentProof',
-        details: `${isTest ? 'Test-verified' : 'Uploaded (pending verification)'} payment proof for ${updated.orderNumber}`,
+        action: isMatched ? 'VERIFY' : 'FLAG',
+        target: 'PurchaseOrderMatch',
+        details: `${isMatched ? 'Matched' : 'Mismatch detected for'} purchase order ${poCode} against ${updated.orderNumber}`,
       },
     });
-
-    if (!isTest) {
-      return res.status(501).json({
-        error: 'AI verification not available yet. Proof uploaded for manual review.',
-        paymentProofUrl: updated.paymentProofUrl,
-        verificationStatus: 'pending',
-      });
-    }
     return res.status(200).json({
       ...updated,
-      verificationStatus: 'verified',
+      paymentProofUrl: updated.paymentProofUrl,
+      poDocumentUrl: updated.paymentProofUrl,
+      chequeVerification: isMatched ? 'genuine' : 'fraud',
+      poMatchStatus: isMatched ? 'genuine' : 'fraud',
+      verificationStatus: isMatched ? 'verified' : 'mismatch',
     });
   } catch (err) {
     next(err);

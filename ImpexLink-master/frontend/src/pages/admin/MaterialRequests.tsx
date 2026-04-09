@@ -38,13 +38,14 @@ import { useResource } from '@/hooks/use-resource';
 import { Skeleton } from '@/components/ui/skeleton';
 import { apiClient } from '@/api/client';
 import { useAuth } from '@/contexts/AuthContext';
-import { canApproveMaterialRequests, canCreateMaterialRequests } from '@/lib/roles';
+import { canApproveMaterialRequests, canCreateMaterialRequests, hasRole } from '@/lib/roles';
 
 export default function MaterialRequestsPage() {
   const { user } = useAuth();
   const roleInput = user?.roles?.length ? user.roles : user?.role;
   const canApprove = canApproveMaterialRequests(roleInput);
   const canCreate = canCreateMaterialRequests(roleInput);
+  const isPaintChemist = hasRole(roleInput, 'paint_chemist');
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [sortKey, setSortKey] = useState<'createdAt' | 'status' | 'urgency'>('createdAt');
@@ -62,7 +63,7 @@ export default function MaterialRequestsPage() {
       sortDir,
     }
   );
-  const { data: projects } = useResource<Project[]>('/projects', []);
+  const { data: projects } = useResource<Project[]>('/projects', [], [user?.id], 15_000, { picker: true });
   const { data: inventory } = useResource<InventoryItem[]>('/inventory', []);
   const [selectedRequest, setSelectedRequest] = useState<MaterialRequest | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
@@ -83,18 +84,16 @@ export default function MaterialRequestsPage() {
     status: String(req.status || 'pending').toLowerCase() as MaterialRequest['status'],
     urgency: String(req.urgency || 'normal').toLowerCase() as UrgencyLevel,
   }));
-  const scopedInventory =
-    roleInput && (Array.isArray(roleInput) ? roleInput.includes('paint_chemist') : roleInput === 'paint_chemist')
-      ? inventory.filter((item) => item.category === 'Paint & Consumables')
-      : inventory;
+  const scopedInventory = isPaintChemist
+    ? inventory.filter((item) => item.category === 'Paint & Consumables')
+    : inventory;
   const isPaintOnlyRequest = (request: MaterialRequest) =>
     request.items.every((item) => scopedInventory.some((inv) => inv.id === item.itemId));
-  const scopedRequests =
-    roleInput && (Array.isArray(roleInput) ? roleInput.includes('paint_chemist') : roleInput === 'paint_chemist')
-      ? normalizedRequests.filter((request) =>
-          request.items.some((item) => scopedInventory.some((inv) => inv.id === item.itemId))
-        )
-      : normalizedRequests;
+  const scopedRequests = isPaintChemist
+    ? normalizedRequests.filter((request) =>
+        request.items.some((item) => scopedInventory.some((inv) => inv.id === item.itemId))
+      )
+    : normalizedRequests;
   const filteredByStatus =
     statusFilter === 'all' ? scopedRequests : scopedRequests.filter((r) => r.status === statusFilter);
   const pendingRequests = filteredByStatus.filter((r) => r.status === 'pending');
@@ -103,8 +102,13 @@ export default function MaterialRequestsPage() {
   const canApproveSelected =
     Boolean(selectedRequest) &&
     canApprove &&
-    (!(Array.isArray(roleInput) ? roleInput.includes('paint_chemist') : roleInput === 'paint_chemist') ||
-      (selectedRequest && isPaintOnlyRequest(selectedRequest)));
+    (!isPaintChemist || (selectedRequest && isPaintOnlyRequest(selectedRequest)));
+
+  const getDraftEstimatedCost = () =>
+    newRequest.items.reduce((sum, item) => {
+      const inv = scopedInventory.find((entry) => entry.id === item.itemId);
+      return sum + (inv?.unitPrice || 0) * Number(item.quantity || 0);
+    }, 0);
 
   const getStatusBadge = (status: MaterialRequest['status']) => {
     switch (status) {
@@ -542,7 +546,9 @@ export default function MaterialRequestsPage() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Item</TableHead>
+                      <TableHead className="w-[140px]">Unit Price</TableHead>
                       <TableHead className="w-[100px]">Quantity</TableHead>
+                      <TableHead className="w-[160px]">Estimated Cost</TableHead>
                       <TableHead>Notes</TableHead>
                       <TableHead className="w-[80px]"></TableHead>
                     </TableRow>
@@ -551,29 +557,29 @@ export default function MaterialRequestsPage() {
                     {newRequest.items.map((item, index) => (
                       <TableRow key={index}>
                         <TableCell>
-                            <Select
-                              value={item.itemId}
-                              onValueChange={(v) => {
-                                const updated = [...newRequest.items];
-                                updated[index].itemId = v;
-                                setNewRequest((prev) => ({ ...prev, items: updated }));
-                                if (requestErrors.items || requestErrors[`item-${index}`]) {
-                                  setRequestErrors((prev) => {
-                                    const next = { ...prev };
-                                    delete next.items;
-                                    delete next[`item-${index}`];
-                                    return next;
-                                  });
-                                }
-                              }}
-                            >
+                          <Select
+                            value={item.itemId}
+                            onValueChange={(v) => {
+                              const updated = [...newRequest.items];
+                              updated[index].itemId = v;
+                              setNewRequest((prev) => ({ ...prev, items: updated }));
+                              if (requestErrors.items || requestErrors[`item-${index}`]) {
+                                setRequestErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.items;
+                                  delete next[`item-${index}`];
+                                  return next;
+                                });
+                              }
+                            }}
+                          >
                             <SelectTrigger>
                               <SelectValue placeholder="Select item" />
                             </SelectTrigger>
                             <SelectContent>
                               {scopedInventory.map((inv) => (
                                 <SelectItem key={inv.id} value={inv.id}>
-                                  {inv.name} ({inv.unit})
+                                  {inv.name} ({inv.unit}) • ₱{inv.unitPrice.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
                                 </SelectItem>
                               ))}
                             </SelectContent>
@@ -583,27 +589,44 @@ export default function MaterialRequestsPage() {
                           )}
                         </TableCell>
                         <TableCell>
-                            <Input
-                              type="number"
-                              min="1"
-                              value={item.quantity}
-                              onChange={(e) => {
-                                const updated = [...newRequest.items];
-                                updated[index].quantity = parseInt(e.target.value) || 1;
-                                setNewRequest((prev) => ({ ...prev, items: updated }));
-                                if (requestErrors.items || requestErrors[`qty-${index}`]) {
-                                  setRequestErrors((prev) => {
-                                    const next = { ...prev };
-                                    delete next.items;
-                                    delete next[`qty-${index}`];
-                                    return next;
-                                  });
-                                }
-                              }}
-                            />
-                            {requestErrors[`qty-${index}`] && (
-                              <p className="text-xs text-destructive mt-1">{requestErrors[`qty-${index}`]}</p>
-                            )}
+                          <div className="text-sm font-medium">
+                            ₱
+                            {(scopedInventory.find((i) => i.id === item.itemId)?.unitPrice || 0).toLocaleString('en-PH', {
+                              minimumFractionDigits: 2,
+                            })}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <Input
+                            type="number"
+                            min="1"
+                            value={item.quantity}
+                            onChange={(e) => {
+                              const updated = [...newRequest.items];
+                              updated[index].quantity = parseInt(e.target.value) || 1;
+                              setNewRequest((prev) => ({ ...prev, items: updated }));
+                              if (requestErrors.items || requestErrors[`qty-${index}`]) {
+                                setRequestErrors((prev) => {
+                                  const next = { ...prev };
+                                  delete next.items;
+                                  delete next[`qty-${index}`];
+                                  return next;
+                                });
+                              }
+                            }}
+                          />
+                          {requestErrors[`qty-${index}`] && (
+                            <p className="text-xs text-destructive mt-1">{requestErrors[`qty-${index}`]}</p>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm font-semibold text-primary">
+                            ₱
+                            {(
+                              (scopedInventory.find((i) => i.id === item.itemId)?.unitPrice || 0) *
+                              Number(item.quantity || 0)
+                            ).toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                          </div>
                         </TableCell>
                         <TableCell>
                           <Input
@@ -649,6 +672,14 @@ export default function MaterialRequestsPage() {
                   <Plus size={16} className="mr-2" />
                   Add Item
                 </Button>
+                <div className="flex justify-end">
+                  <div className="rounded-md bg-muted px-4 py-3 text-sm">
+                    <span className="text-muted-foreground">Estimated Request Total: </span>
+                    <span className="font-semibold text-primary">
+                      ₱{getDraftEstimatedCost().toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -747,7 +778,7 @@ export default function MaterialRequestsPage() {
                   onChange={(e) => setApprovalRemarks(e.target.value)}
                   rows={3}
                 />
-                {user?.role === 'paint_chemist' && selectedRequest && !isPaintOnlyRequest(selectedRequest) && (
+                {isPaintChemist && selectedRequest && !isPaintOnlyRequest(selectedRequest) && (
                   <p className="text-xs text-destructive">
                     Approval disabled: all items must be in Paint & Consumables.
                   </p>

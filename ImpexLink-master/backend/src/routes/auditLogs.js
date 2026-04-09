@@ -5,7 +5,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 router.use(requireAuth);
-router.use(requireRole(['ADMIN']));
+router.use(requireRole(['ADMIN', 'PRESIDENT']));
 
 router.get('/', async (req, res, next) => {
   try {

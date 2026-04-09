@@ -111,6 +111,11 @@ enum QuoteStatus {
   DECLINED
 }
 
+enum ClientVisibilityScope {
+  COMPANY
+  USER
+}
+
 enum StockTransactionType {
   PURCHASE
   ISSUE
@@ -158,6 +163,7 @@ model User {
   notifications      Notification[]
   productWatches     ProductWatch[]     @relation("UserProductWatches")
   assignedProjects   Project[]          @relation("ProjectAssignedPm")
+  assignedDeliveries Delivery[]         @relation("DeliveryAssignedDriver")
 
   @@index([roleId])
   @@map("users")
@@ -259,6 +265,7 @@ model Client {
   contactPerson String? @db.VarChar(150) @map("contact_person")
   phone      String? @db.VarChar(50)
   tin        String? @db.VarChar(50)
+  visibilityScope ClientVisibilityScope @default(COMPANY) @map("visibility_scope")
   deletedAt  DateTime? @map("deleted_at")
 
   projects      Project[]
@@ -273,6 +280,7 @@ model Project {
   projectName String        @db.VarChar(150) @map("project_name")
   clientId    Int?          @map("client_id")
   assignedPmId Int?         @map("assigned_pm_id")
+  location    String?       @db.Text
   status      ProjectStatus @default(ACTIVE)
   startDate   DateTime?     @db.Date @map("start_date")
   totalValue  Decimal       @default(0) @db.Decimal(12, 2) @map("total_value")
@@ -437,19 +445,23 @@ model Delivery {
   deliveryId    Int            @id @default(autoincrement()) @map("delivery_id")
   drNumber      String         @unique @db.VarChar(50) @map("dr_number")
   clientOrderId Int?           @map("client_order_id")
+  assignedDriverId Int?        @map("assigned_driver_id")
   status        DeliveryStatus @default(PENDING)
   eta           DateTime?      @db.Date
   itemsCount    Int?           @map("items_count")
   createdAt     DateTime       @default(now()) @map("created_at")
   receivedAt    DateTime?      @map("received_at")
   receivedBy    String?        @map("received_by")
+  proofOfDeliveryUrl String?   @db.Text @map("proof_of_delivery_url")
   notes         String?        @db.Text
   returnRejectionReason String? @db.Text @map("return_rejection_reason")
   deletedAt     DateTime?      @map("deleted_at")
 
   clientOrder ClientOrder? @relation(fields: [clientOrderId], references: [clientOrderId])
+  assignedDriver User?      @relation("DeliveryAssignedDriver", fields: [assignedDriverId], references: [userId])
 
   @@index([clientOrderId])
+  @@index([assignedDriverId])
   @@map("deliveries")
 }
 

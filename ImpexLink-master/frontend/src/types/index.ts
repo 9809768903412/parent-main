@@ -18,6 +18,7 @@ export interface User {
   roles?: UserRole[];
   companyName?: string;
   clientId?: string;
+  clientVisibilityScope?: 'company' | 'user';
   avatar?: string;
   avatarUrl?: string;
   phone?: string;
@@ -64,6 +65,7 @@ export interface Client {
   phone: string;
   address: string;
   tin?: string;
+  visibilityScope?: 'company' | 'user';
 }
 
 export interface Project {
@@ -73,6 +75,7 @@ export interface Project {
   clientName: string;
   assignedPmId?: string | null;
   assignedPmName?: string | null;
+  location?: string | null;
   status: 'pending' | 'rejected' | 'active' | 'completed' | 'on-hold';
   startDate: string;
   endDate?: string;
@@ -113,6 +116,8 @@ export interface Order {
   cancelReason?: string | null;
   chequeImage?: string;
   chequeVerification?: 'pending' | 'genuine' | 'fraud';
+  poDocumentUrl?: string;
+  poMatchStatus?: 'pending' | 'genuine' | 'fraud';
 }
 
 // Material Request Types
@@ -169,7 +174,14 @@ export interface Supplier {
 }
 
 // Delivery Types
-export type DeliveryStatus = 'pending' | 'in-transit' | 'delivered' | 'return-pending' | 'return-rejected' | 'returned';
+export type DeliveryStatus =
+  | 'pending'
+  | 'in-transit'
+  | 'delivered'
+  | 'delayed'
+  | 'return-pending'
+  | 'return-rejected'
+  | 'returned';
 
 export interface Delivery {
   id: string;
@@ -189,6 +201,8 @@ export interface Delivery {
   proofOfDelivery?: string;
   notes?: string;
   returnRejectionReason?: string | null;
+  assignedDriverId?: string | null;
+  driverName?: string | null;
 }
 
 // Quote Request Types
@@ -205,6 +219,33 @@ export interface QuoteRequest {
   quotedAmount?: number;
 }
 
+export interface ProjectFormLine {
+  qty: number;
+  unit: string;
+  description: string;
+}
+
+export interface ProjectForm {
+  id: string;
+  projectId: string;
+  projectName: string;
+  company: string;
+  address: string;
+  oRefNumber: string;
+  poNumber: string;
+  area: string;
+  thortexProducts: ProjectFormLine[];
+  consumableMaterials: ProjectFormLine[];
+  toolsEquipmentOthers: ProjectFormLine[];
+  requestedBy: string;
+  checkedBy: string;
+  subtotal: number;
+  vat: number;
+  totalCost: number;
+  createdBy: string;
+  createdAt: string;
+}
+
 // Notification Types
 export type NotificationType = 
   | 'low-stock' 
@@ -213,6 +254,7 @@ export type NotificationType =
   | 'payment-verified' 
   | 'request-approval'
   | 'quote-response'
+  | 'project-update'
   | 'ai-alert';
 
 export interface Notification {
@@ -274,4 +316,5 @@ export interface FraudAlert {
   message: string;
   timestamp: string;
   chequeImage?: string;
+  poDocumentUrl?: string;
 }

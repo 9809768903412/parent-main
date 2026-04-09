@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Package, FileText, Download, Eye, RotateCcw, Upload, Clock, CheckCircle, Truck, CreditCard } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -22,10 +22,9 @@ import {
 } from '@/components/ui/dialog';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
-import { Progress } from '@/components/ui/progress';
 import { useAuth } from '@/contexts/AuthContext';
-import { useNavigate, useParams } from 'react-router-dom';
-import type { Order, OrderStatus, Project } from '@/types';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import type { Delivery, Order, OrderStatus, Project } from '@/types';
 import { cn } from '@/lib/utils';
 import { calcLineAmounts, calcTotalsFromItems, VAT_RATE } from '@/lib/vat';
 import { useToast } from '@/hooks/use-toast';
@@ -35,37 +34,79 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { printHtml } from '@/utils/print';
 import { useResource } from '@/hooks/use-resource';
 import PaginationNav from '@/components/PaginationNav';
+import LiveTrackingDialog from '@/components/LiveTrackingDialog';
+import { buildMockPastOrders } from '@/mocks/pastOrders';
 
 export default function MyOrdersPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
   const { orderId } = useParams();
   const [orders, setOrders] = useState<Order[]>(() => getCache<Order[]>('client-orders') || []);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [ordersPage, setOrdersPage] = useState(1);
   const [ordersPageSize] = useState(10);
+  const [pastOrdersPage, setPastOrdersPage] = useState(1);
+  const [pastOrdersPageSize] = useState(6);
   const [ordersLoading, setOrdersLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'my-orders' | 'company-orders'>('my-orders');
+  const [activeTab, setActiveTab] = useState<'my-orders' | 'my-deliveries' | 'past-orders'>(
+    searchParams.get('tab') === 'my-deliveries'
+      ? 'my-deliveries'
+      : searchParams.get('tab') === 'past-orders'
+        ? 'past-orders'
+        : 'my-orders'
+  );
   const { data: projects } = useResource<Project[]>('/projects', []);
+  const { data: deliveries } = useResource<Delivery[]>('/deliveries', []);
 
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
+  const [trackingDelivery, setTrackingDelivery] = useState<Delivery | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [verificationResult, setVerificationResult] = useState<'genuine' | 'fraud' | null>(null);
   const [selectedFileName, setSelectedFileName] = useState<string>('');
+  const [poCodeInput, setPoCodeInput] = useState('');
   const [useTestVerification, setUseTestVerification] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Filter orders for current client's company
   const clientOrders = orders;
-  const allCompanyOrders = orders;
+  const pastOrders = useMemo(
+    () =>
+      [...clientOrders]
+        .filter((order) => order.status === 'delivered')
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [clientOrders]
+  );
+  const mockPastOrders = useMemo(
+    () =>
+      buildMockPastOrders({
+        clientId: user?.clientId || user?.id || 'mock-client',
+        clientName: user?.companyName || user?.name || 'Client Account',
+        createdBy: user?.id || 'mock-user',
+      }),
+    [user?.clientId, user?.companyName, user?.id, user?.name]
+  );
+  const showingMockPastOrders = pastOrders.length === 0;
+  const visiblePastOrders = showingMockPastOrders ? mockPastOrders : pastOrders;
+  const totalPastOrdersPages = Math.max(1, Math.ceil(visiblePastOrders.length / pastOrdersPageSize));
+  const pagedPastOrders = visiblePastOrders.slice(
+    (pastOrdersPage - 1) * pastOrdersPageSize,
+    pastOrdersPage * pastOrdersPageSize
+  );
+  const myDeliveries = deliveries
+    .filter((delivery) => clientOrders.some((order) => order.id === delivery.orderId))
+    .sort((a, b) => new Date(b.issuedAt).getTime() - new Date(a.issuedAt).getTime());
   const projectStatusById = projects.reduce<Record<string, Project['status']>>((acc, project) => {
     acc[project.id] = project.status;
     return acc;
   }, {});
+  const selectedDelivery = selectedOrder
+    ? myDeliveries.find((delivery) => delivery.orderId === selectedOrder.id) || null
+    : null;
   const selectedTotals = selectedOrder
     ? calcTotalsFromItems(
         selectedOrder.items.map((item) => ({
@@ -75,6 +116,58 @@ export default function MyOrdersPage() {
       )
     : null;
   const vatLabel = Math.round(VAT_RATE * 100);
+
+  const getDeliveryBadge = (status: Delivery['status']) => {
+    switch (status) {
+      case 'pending':
+        return <Badge className="bg-yellow-100 text-yellow-800">Pending Dispatch</Badge>;
+      case 'in-transit':
+        return <Badge className="bg-blue-100 text-blue-800 gap-1"><Truck size={12} />In Transit</Badge>;
+      case 'delivered':
+        return <Badge className="bg-green-100 text-green-800 gap-1"><CheckCircle size={12} />Delivered</Badge>;
+      case 'delayed':
+        return <Badge className="bg-orange-100 text-orange-800 gap-1"><Clock size={12} />Delayed</Badge>;
+      case 'return-pending':
+        return <Badge className="bg-orange-100 text-orange-800">Return Pending</Badge>;
+      case 'return-rejected':
+        return <Badge className="bg-slate-100 text-slate-700">Return Rejected</Badge>;
+      case 'returned':
+        return <Badge className="bg-red-100 text-red-800">Returned</Badge>;
+    }
+  };
+
+  const buildOrderTimeline = (order: Order, delivery: Delivery | null) => [
+    {
+      label: 'Order Placed',
+      date: order.createdAt,
+      active: true,
+      tone: 'bg-green-600',
+    },
+    {
+      label: 'Order Approved',
+      date: ['approved', 'processing', 'shipped', 'delivered'].includes(order.status) ? order.updatedAt : null,
+      active: ['approved', 'processing', 'shipped', 'delivered'].includes(order.status),
+      tone: 'bg-green-600',
+    },
+    {
+      label: 'Prepared / Processing',
+      date: ['processing', 'shipped', 'delivered'].includes(order.status) ? order.updatedAt : null,
+      active: ['processing', 'shipped', 'delivered'].includes(order.status),
+      tone: 'bg-blue-600',
+    },
+    {
+      label: 'Dispatched',
+      date: delivery?.issuedAt || null,
+      active: Boolean(delivery),
+      tone: 'bg-blue-600',
+    },
+    {
+      label: 'Delivered',
+      date: delivery?.receivedAt || null,
+      active: delivery?.status === 'delivered',
+      tone: 'bg-green-600',
+    },
+  ];
 
   const getStatusBadge = (status: OrderStatus) => {
     switch (status) {
@@ -106,17 +199,6 @@ export default function MyOrdersPage() {
     }
   };
 
-  const getStatusProgress = (status: OrderStatus) => {
-    switch (status) {
-      case 'pending': return 20;
-      case 'approved': return 40;
-      case 'processing': return 60;
-      case 'shipped': return 80;
-      case 'delivered': return 100;
-      default: return 0;
-    }
-  };
-
   const handleRowClick = (order: Order) => {
     setSelectedOrder(order);
     setIsDetailOpen(true);
@@ -124,14 +206,18 @@ export default function MyOrdersPage() {
 
   const handleReorder = (order: Order) => {
     toast({
-      title: 'Items Added to Cart',
-      description: `${order.items.length} items from ${order.orderNumber} added to your cart.`,
+      title: 'Items added to cart',
+      description: 'Items added to cart. You can now review and place the order.',
     });
     localStorage.setItem('reorder_cart', JSON.stringify(order.items));
     navigate('/client/order');
   };
 
   const handleUploadPayment = () => {
+    setPoCodeInput(selectedOrder?.orderNumber || '');
+    setSelectedFileName('');
+    setUploadError('');
+    setVerificationResult(null);
     setIsUploadOpen(true);
   };
 
@@ -142,11 +228,20 @@ export default function MyOrdersPage() {
     setUploadError('');
 
     try {
+      if (!poCodeInput.trim()) {
+        setUploadError('Please enter the purchase order code.');
+        toast({
+          title: 'PO code required',
+          description: 'Enter the purchase order code so we can match it to your order.',
+          variant: 'destructive',
+        });
+        return;
+      }
       if (!file && !useTestVerification) {
-        setUploadError('Please choose a proof of payment file.');
+        setUploadError('Please choose a purchase order file.');
         toast({
           title: 'No file selected',
-          description: 'Please choose a proof of payment file.',
+          description: 'Please choose a purchase order file.',
           variant: 'destructive',
         });
         return;
@@ -155,6 +250,7 @@ export default function MyOrdersPage() {
       if (file) {
         formData.append('proof', file);
       }
+      formData.append('poCode', poCodeInput.trim());
       const res = await apiClient.post(`/orders/${selectedOrder.id}/payment-proof`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
@@ -162,14 +258,22 @@ export default function MyOrdersPage() {
         },
       });
       const paymentStatus = (res.data?.paymentStatus || selectedOrder.paymentStatus || '').toLowerCase();
-      const chequeVerification = (res.data?.chequeVerification || selectedOrder.chequeVerification || '').toLowerCase();
+      const poMatchStatus = (
+        res.data?.poMatchStatus ||
+        res.data?.chequeVerification ||
+        selectedOrder.poMatchStatus ||
+        selectedOrder.chequeVerification ||
+        ''
+      ).toLowerCase();
       const updatedOrder = {
         ...selectedOrder,
         paymentStatus: paymentStatus || selectedOrder.paymentStatus,
-        chequeVerification: chequeVerification || selectedOrder.chequeVerification,
+        chequeVerification: poMatchStatus || selectedOrder.chequeVerification,
+        poMatchStatus: poMatchStatus || selectedOrder.poMatchStatus,
         chequeImage: res.data?.paymentProofUrl || selectedOrder.chequeImage,
+        poDocumentUrl: res.data?.poDocumentUrl || res.data?.paymentProofUrl || selectedOrder.poDocumentUrl,
       } as Order;
-      setVerificationResult(chequeVerification === 'genuine' ? 'genuine' : 'pending');
+      setVerificationResult(poMatchStatus === 'genuine' ? 'genuine' : 'fraud');
       setSelectedOrder(updatedOrder);
       setOrders((prev) => prev.map((o) => (o.id === selectedOrder.id ? updatedOrder : o)));
       setCache(
@@ -179,28 +283,22 @@ export default function MyOrdersPage() {
         )
       );
       toast({
-        title: useTestVerification ? 'Payment Verified (Test)' : 'Payment Proof Received',
-        description: useTestVerification
-          ? 'Your payment has been verified successfully.'
-          : 'Your payment proof was received and is pending verification.',
+        title: poMatchStatus === 'genuine' ? 'Purchase Order Matched' : 'Purchase Order Mismatch',
+        description:
+          poMatchStatus === 'genuine'
+            ? 'Your purchase order matches this order and has been recorded.'
+            : 'The uploaded purchase order code does not match this order yet.',
       });
       refreshOrders();
     } catch (err) {
-      const status = (err as any)?.response?.status;
-      if (status === 501) {
-        toast({
-          title: 'Proof uploaded',
-          description: 'Verification is pending manual review.',
-        });
-        refreshOrders();
-      } else {
-        setVerificationResult(null);
-        toast({
-          title: 'Verification Failed',
-          description: 'Please try again or contact support.',
-          variant: 'destructive',
-        });
-      }
+      setVerificationResult(null);
+      const message =
+        (err as any)?.response?.data?.error || 'Please try again or contact support.';
+      toast({
+        title: 'PO Matching Failed',
+        description: message,
+        variant: 'destructive',
+      });
     } finally {
       setIsVerifying(false);
     }
@@ -261,9 +359,6 @@ export default function MyOrdersPage() {
         page: ordersPage,
         pageSize: ordersPageSize,
       };
-      if (activeTab === 'my-orders' && user?.id) {
-        params.createdBy = Number(user.id);
-      }
       const response = await apiClient.get('/orders', { params });
       const payload = response.data;
       if (payload?.data) {
@@ -286,6 +381,24 @@ export default function MyOrdersPage() {
   useEffect(() => {
     refreshOrders();
   }, [refreshOrders]);
+
+  useEffect(() => {
+    const requestedTab =
+      searchParams.get('tab') === 'my-deliveries'
+        ? 'my-deliveries'
+        : searchParams.get('tab') === 'past-orders'
+          ? 'past-orders'
+          : 'my-orders';
+    if (requestedTab !== activeTab) {
+      setActiveTab(requestedTab);
+    }
+  }, [activeTab, searchParams]);
+
+  const getPastOrderSummary = (order: Order) =>
+    order.items
+      .slice(0, 3)
+      .map((item) => `${item.itemName} x ${item.quantity}`)
+      .join(', ');
 
   useEffect(() => {
     if (!orderId || orders.length === 0) return;
@@ -346,17 +459,32 @@ export default function MyOrdersPage() {
               <TableCell>{getStatusBadge(order.status)}</TableCell>
               <TableCell>{getPaymentBadge(order.paymentStatus)}</TableCell>
               <TableCell className="text-right">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleRowClick(order);
-                  }}
-                >
-                  <Eye size={16} className="mr-1" />
-                  View
-                </Button>
+                <div className="flex justify-end gap-2">
+                  {myDeliveries.some((delivery) => delivery.orderId === order.id) ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const delivery = myDeliveries.find((entry) => entry.orderId === order.id);
+                        if (delivery) setTrackingDelivery(delivery);
+                      }}
+                    >
+                      Track Delivery
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRowClick(order);
+                    }}
+                  >
+                    <Eye size={16} className="mr-1" />
+                    View
+                  </Button>
+                </div>
               </TableCell>
             </TableRow>
           ))
@@ -371,13 +499,107 @@ export default function MyOrdersPage() {
     </Table>
   );
 
+  const DeliveryTable = ({ data }: { data: Delivery[] }) => (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>DR #</TableHead>
+          <TableHead>Order #</TableHead>
+          <TableHead>Project</TableHead>
+          <TableHead>ETA</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead className="text-right">Track</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {data.length > 0 ? (
+          data.map((delivery) => (
+            <TableRow
+              key={delivery.id}
+              className="cursor-pointer hover:bg-muted/50"
+              onClick={() => {
+                const linkedOrder = clientOrders.find((order) => order.id === delivery.orderId);
+                if (linkedOrder) {
+                  handleRowClick(linkedOrder);
+                }
+              }}
+            >
+              <TableCell className="font-medium">{delivery.drNumber}</TableCell>
+              <TableCell>{delivery.orderNumber}</TableCell>
+              <TableCell>{delivery.projectName || '-'}</TableCell>
+              <TableCell>{delivery.eta ? new Date(delivery.eta).toLocaleDateString('en-PH') : '—'}</TableCell>
+              <TableCell>{getDeliveryBadge(delivery.status)}</TableCell>
+              <TableCell className="text-right">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setTrackingDelivery(delivery);
+                  }}
+                >
+                  Track Delivery
+                </Button>
+              </TableCell>
+            </TableRow>
+          ))
+        ) : (
+          <TableRow>
+            <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+              No deliveries found
+            </TableCell>
+          </TableRow>
+        )}
+      </TableBody>
+    </Table>
+  );
+
+  const PastOrdersList = ({ data }: { data: Order[] }) => (
+    <div className="space-y-3">
+      {data.length > 0 ? (
+        data.map((order) => (
+          <div key={order.id} className="rounded-2xl border bg-background p-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold">{order.orderNumber}</p>
+                  <span className="text-sm text-muted-foreground">
+                    {new Date(order.createdAt).toLocaleDateString('en-PH')}
+                  </span>
+                  {getStatusBadge(order.status)}
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {order.projectName || 'No project assigned'}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {getPastOrderSummary(order)}
+                  {order.items.length > 3 ? `, +${order.items.length - 3} more` : ''}
+                </p>
+                <p className="text-sm font-medium">
+                  ₱{order.total.toLocaleString('en-PH', { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+              <Button onClick={() => handleReorder(order)} className="w-full lg:w-auto">
+                Reorder This
+              </Button>
+            </div>
+          </div>
+        ))
+      ) : (
+        <div className="rounded-2xl border border-dashed px-4 py-10 text-center text-sm text-muted-foreground">
+          No completed orders yet.
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold">My Orders</h1>
-          <p className="text-muted-foreground">Track and manage your orders</p>
+          <h1 className="text-2xl font-bold">Orders & Deliveries</h1>
+          <p className="text-muted-foreground">Everything you need in one place: orders, deliveries, and live tracking.</p>
         </div>
         <Button onClick={() => navigate('/client/order')} className="gap-2">
           <Package size={18} />
@@ -385,44 +607,18 @@ export default function MyOrdersPage() {
         </Button>
       </div>
 
-      {/* Summary Card */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <div className="text-center">
-              <p className="text-2xl font-bold">{clientOrders.length}</p>
-              <p className="text-sm text-muted-foreground">Total Orders</p>
-            </div>
-            <div className="text-center">
-              <p className="text-2xl font-bold text-warning">
-                {clientOrders.filter((o) => o.status === 'pending').length}
-              </p>
-              <p className="text-sm text-muted-foreground">Pending</p>
-            </div>
-            <div className="text-center">
-              <p className="text-2xl font-bold text-info">
-                {clientOrders.filter((o) => o.status === 'shipped' || o.status === 'processing').length}
-              </p>
-              <p className="text-sm text-muted-foreground">In Progress</p>
-            </div>
-            <div className="text-center">
-              <p className="text-2xl font-bold text-success">
-                {clientOrders.filter((o) => o.status === 'delivered').length}
-              </p>
-              <p className="text-sm text-muted-foreground">Delivered</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={(value) => {
-        setActiveTab(value as typeof activeTab);
+        const nextTab = value as typeof activeTab;
+        setActiveTab(nextTab);
         setOrdersPage(1);
+        setPastOrdersPage(1);
+        setSearchParams(nextTab === 'my-orders' ? {} : { tab: nextTab });
       }} className="space-y-4">
         <TabsList>
           <TabsTrigger value="my-orders">My Orders</TabsTrigger>
-          <TabsTrigger value="company-orders">All Company Orders</TabsTrigger>
+          <TabsTrigger value="my-deliveries">My Deliveries</TabsTrigger>
+          <TabsTrigger value="past-orders">Past Orders</TabsTrigger>
         </TabsList>
 
         <TabsContent value="my-orders">
@@ -445,24 +641,51 @@ export default function MyOrdersPage() {
         </div>
         </TabsContent>
 
-        <TabsContent value="company-orders">
+        <TabsContent value="my-deliveries">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Company-Wide Orders</CardTitle>
-              <CardDescription>All orders from {user?.companyName || 'your company'}</CardDescription>
+              <CardTitle className="text-lg">My Deliveries</CardTitle>
+              <CardDescription>Deliveries linked to your orders</CardDescription>
             </CardHeader>
             <CardContent className="p-0">
-              <OrderTable data={allCompanyOrders} />
+              <DeliveryTable data={myDeliveries} />
             </CardContent>
           </Card>
-        <div className="flex items-center justify-center">
-          <PaginationNav
-            page={ordersPage}
-            totalPages={Math.max(Math.ceil(ordersTotal / ordersPageSize), 1)}
-            onPageChange={setOrdersPage}
-            disabled={ordersLoading}
-          />
-        </div>
+        </TabsContent>
+
+        <TabsContent value="past-orders">
+          <Card>
+            <CardHeader>
+              <div className="flex flex-wrap items-center gap-2">
+                <CardTitle className="text-lg">Past Orders</CardTitle>
+                {showingMockPastOrders ? (
+                  <Badge variant="outline" className="border-[#C0392B]/20 bg-[#fff7f4] text-[#C0392B]">
+                    Preview Data
+                  </Badge>
+                ) : null}
+              </div>
+              <CardDescription>
+                {showingMockPastOrders
+                  ? 'Preview of completed orders you can quickly repeat.'
+                  : 'Completed orders you can quickly repeat.'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <PastOrdersList data={pagedPastOrders} />
+              {visiblePastOrders.length > pastOrdersPageSize ? (
+                <div className="flex flex-col items-center gap-3">
+                  <p className="text-sm text-muted-foreground">
+                    Showing {(pastOrdersPage - 1) * pastOrdersPageSize + 1}-{Math.min(pastOrdersPage * pastOrdersPageSize, visiblePastOrders.length)} of {visiblePastOrders.length} past orders
+                  </p>
+                  <PaginationNav
+                    page={pastOrdersPage}
+                    totalPages={totalPastOrdersPages}
+                    onPageChange={setPastOrdersPage}
+                  />
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
         </TabsContent>
 
       </Tabs>
@@ -526,6 +749,70 @@ export default function MyOrdersPage() {
                     <span className={selectedOrder.status === 'processing' ? 'font-medium text-foreground' : ''}>Processing</span>
                     <span className={selectedOrder.status === 'shipped' ? 'font-medium text-foreground' : ''}>Shipped</span>
                     <span className={selectedOrder.status === 'delivered' ? 'font-medium text-foreground' : ''}>Delivered</span>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h4 className="font-semibold">Delivery Status</h4>
+                      <p className="text-sm text-muted-foreground">
+                        {selectedDelivery
+                          ? 'Order and delivery updates are shown together here.'
+                          : 'This order has not been dispatched yet.'}
+                      </p>
+                    </div>
+                    {selectedDelivery ? (
+                      getDeliveryBadge(selectedDelivery.status)
+                    ) : (
+                      <Badge variant="outline">Waiting for dispatch</Badge>
+                    )}
+                  </div>
+                  {selectedDelivery ? (
+                    <div className="grid gap-3 md:grid-cols-3 text-sm">
+                      <div className="rounded-md border bg-background p-3">
+                        <p className="text-muted-foreground">Delivery Receipt</p>
+                        <p className="font-medium">{selectedDelivery.drNumber}</p>
+                      </div>
+                      <div className="rounded-md border bg-background p-3">
+                        <p className="text-muted-foreground">ETA</p>
+                        <p className="font-medium">
+                          {selectedDelivery.eta
+                            ? new Date(selectedDelivery.eta).toLocaleString('en-PH')
+                            : 'To be scheduled'}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-background p-3">
+                        <p className="text-muted-foreground">Received By</p>
+                        <p className="font-medium">{selectedDelivery.receivedBy || 'Pending confirmation'}</p>
+                      </div>
+                    </div>
+                  ) : null}
+                  {selectedDelivery ? (
+                    <div className="flex justify-end">
+                      <Button variant="outline" onClick={() => setTrackingDelivery(selectedDelivery)}>
+                        Track Delivery
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="space-y-3">
+                  <h4 className="font-semibold">Timeline</h4>
+                  <div className="space-y-3">
+                    {buildOrderTimeline(selectedOrder, selectedDelivery).map((step) => (
+                      <div key={step.label} className="flex items-start gap-3">
+                        <div className={cn('mt-1 h-3 w-3 rounded-full', step.active ? step.tone : 'bg-muted')} />
+                        <div>
+                          <p className={cn('text-sm font-medium', step.active ? 'text-foreground' : 'text-muted-foreground')}>
+                            {step.label}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {step.date ? new Date(step.date).toLocaleString('en-PH') : 'Waiting'}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
@@ -599,14 +886,19 @@ export default function MyOrdersPage() {
                       {selectedOrder.paymentStatus === 'pending' && selectedOrder.status !== 'cancelled' && (
                         <Button onClick={handleUploadPayment} className="w-full gap-2">
                           <Upload size={18} />
-                          Upload Payment (Cheque)
+                          Upload Purchase Order
                         </Button>
                       )}
                     </>
                   )}
-                  {selectedOrder.chequeVerification === 'genuine' && (
+                  {(selectedOrder.poMatchStatus || selectedOrder.chequeVerification) === 'genuine' && (
                     <div className="p-3 bg-success/10 rounded-lg text-sm text-success">
-                      Cheque verified as genuine
+                      Purchase order matched successfully
+                    </div>
+                  )}
+                  {(selectedOrder.poMatchStatus || selectedOrder.chequeVerification) === 'fraud' && (
+                    <div className="p-3 bg-destructive/10 rounded-lg text-sm text-destructive">
+                      Purchase order code mismatch detected
                     </div>
                   )}
                 </div>
@@ -623,15 +915,18 @@ export default function MyOrdersPage() {
               <FileText size={16} />
               Download DR
             </Button>
-            {selectedOrder?.status !== 'cancelled' && (
-              <Button onClick={() => handleReorder(selectedOrder!)} className="gap-2">
-                <RotateCcw size={16} />
-                Reorder
-              </Button>
-            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <LiveTrackingDialog
+        delivery={trackingDelivery}
+        open={!!trackingDelivery}
+        onOpenChange={(open) => {
+          if (!open) setTrackingDelivery(null);
+        }}
+        readOnly
+      />
 
       {/* Payment Upload Modal */}
       <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
@@ -639,10 +934,10 @@ export default function MyOrdersPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Upload size={20} />
-              Upload Payment Proof
+              Upload Purchase Order
             </DialogTitle>
             <DialogDescription>
-              Upload an image of your cheque for AI verification
+              Upload the client purchase order and match its PO code to this order
             </DialogDescription>
           </DialogHeader>
 
@@ -650,8 +945,30 @@ export default function MyOrdersPage() {
             {!isVerifying && verificationResult === null && (
               <div className="border-2 border-dashed rounded-lg p-8 text-center">
                 <Upload size={40} className="mx-auto mb-4 text-muted-foreground" />
+                <div className="mb-4 space-y-3 text-left">
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Expected order code</p>
+                    <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm font-medium">
+                      {selectedOrder?.orderNumber}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Purchase Order Code
+                    </label>
+                    <input
+                      value={poCodeInput}
+                      onChange={(event) => {
+                        setPoCodeInput(event.target.value);
+                        if (uploadError) setUploadError('');
+                      }}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      placeholder="Enter the PO code from the uploaded file"
+                    />
+                  </div>
+                </div>
                 <p className="text-sm text-muted-foreground mb-4">
-                  Drag and drop your cheque image, or click to browse
+                  Upload the purchase order PDF or image, then we will check whether the PO code matches this order.
                 </p>
                 <label className="flex items-center justify-center gap-2 text-xs text-muted-foreground mb-3">
                   <input
@@ -679,7 +996,7 @@ export default function MyOrdersPage() {
                   }}
                 />
                 <Button onClick={() => (useTestVerification ? simulateAIVerification() : fileInputRef.current?.click())}>
-                  Select Image
+                  Select PO File
                 </Button>
                 {selectedFileName && (
                   <p className="mt-2 text-xs text-muted-foreground">
@@ -695,8 +1012,8 @@ export default function MyOrdersPage() {
             {isVerifying && (
               <div className="p-8 text-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-                <p className="font-medium">AI Verifying...</p>
-                <p className="text-sm text-muted-foreground">Analyzing cheque authenticity</p>
+                <p className="font-medium">Matching Purchase Order...</p>
+                <p className="text-sm text-muted-foreground">Checking whether the uploaded PO code matches this order</p>
               </div>
             )}
 
@@ -720,12 +1037,12 @@ export default function MyOrdersPage() {
                   )}
                 </div>
                 <p className={cn('text-lg font-bold', verificationResult === 'genuine' ? 'text-success' : 'text-destructive')}>
-                  {verificationResult === 'genuine' ? 'Cheque Verified' : 'Potential Fraud Detected'}
+                  {verificationResult === 'genuine' ? 'PO Code Matched' : 'PO Code Mismatch'}
                 </p>
                 <p className="text-sm text-muted-foreground mt-2">
                   {verificationResult === 'genuine'
-                    ? 'Your payment has been verified and processed.'
-                    : 'Please contact support for manual verification.'}
+                    ? 'Your uploaded purchase order matches this order.'
+                    : 'Please review the PO code and upload the correct purchase order file.'}
                 </p>
               </div>
             )}

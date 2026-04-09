@@ -44,9 +44,16 @@ async function notifyWatchers(productId, itemName) {
 
 router.get('/', async (req, res, next) => {
   try {
+    const roleList = Array.isArray(req.user?.roles)
+      ? req.user.roles.map((role) => String(role).toUpperCase())
+      : [String(req.user?.role || '').toUpperCase()];
     const pagination = parsePagination(req.query);
     const q = req.query.q ? String(req.query.q) : '';
-    const category = req.query.category ? String(req.query.category) : '';
+    const category = roleList.includes('PAINT_CHEMIST')
+      ? 'Paint & Consumables'
+      : req.query.category
+        ? String(req.query.category)
+        : '';
     const includeDeleted = req.query.includeDeleted === 'true';
     const onlyDeleted = req.query.onlyDeleted === 'true';
     const where = {

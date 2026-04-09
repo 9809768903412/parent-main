@@ -1,17 +1,19 @@
 const express = require('express');
 const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse, parseSort } = require('../utils/pagination');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isEmail, isNonEmptyString } = require('../utils/validate');
+const { resolveLinkedClient } = require('../utils/clientVisibility');
 
 const router = express.Router();
 router.use(requireAuth);
+
+const hasRole = (req, role) => getRoleList(req.user).includes(String(role).toUpperCase());
 
 router.get('/', async (req, res, next) => {
   try {
     const pagination = parsePagination(req.query);
     const q = req.query.q ? String(req.query.q) : '';
-    const role = String(req.user?.role || '').toUpperCase();
     let where = q
       ? {
           OR: [
@@ -22,10 +24,10 @@ router.get('/', async (req, res, next) => {
         }
       : {};
     where = { ...where, deletedAt: null };
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (user?.email) {
-        where = { email: user.email };
+    if (hasRole(req, 'CLIENT')) {
+      const client = (await resolveLinkedClient(prisma, req.user.userId))?.client;
+      if (client?.clientId) {
+        where = { clientId: client.clientId, deletedAt: null };
       }
     }
     const sort = parseSort(req.query, ['clientName', 'email', 'address']);
@@ -47,6 +49,7 @@ router.get('/', async (req, res, next) => {
       phone: c.phone || null,
       address: c.address,
       tin: c.tin || null,
+      visibilityScope: String(c.visibilityScope || 'COMPANY').toLowerCase(),
     }));
     if (pagination) {
       return res.json(buildPaginatedResponse(data, total, pagination.page, pagination.pageSize));
@@ -59,13 +62,21 @@ router.get('/', async (req, res, next) => {
 
 router.post('/', requireRole(['ADMIN']), async (req, res, next) => {
   try {
-    const { clientName, address, email, contactPerson, phone, tin } = req.body;
+    const { clientName, address, email, contactPerson, phone, tin, visibilityScope } = req.body;
     if (!isNonEmptyString(clientName)) return res.status(400).json({ error: 'Client name is required' });
     if (email && !isEmail(email)) {
       return res.status(400).json({ error: 'Invalid email' });
     }
     const client = await prisma.client.create({
-      data: { clientName, address, email, contactPerson, phone, tin },
+      data: {
+        clientName,
+        address,
+        email,
+        contactPerson,
+        phone,
+        tin,
+        visibilityScope: String(visibilityScope || 'company').toUpperCase() === 'USER' ? 'USER' : 'COMPANY',
+      },
     });
     await prisma.auditLog.create({
       data: {
@@ -83,11 +94,8 @@ router.post('/', requireRole(['ADMIN']), async (req, res, next) => {
 
 router.put('/:id', requireRole(['ADMIN', 'CLIENT']), async (req, res, next) => {
   try {
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
-      const user = await prisma.user.findUnique({ where: { userId: req.user.userId } });
-      if (!user?.email) return res.status(403).json({ error: 'Forbidden' });
-      const client = await prisma.client.findFirst({ where: { email: user.email } });
+    if (hasRole(req, 'CLIENT')) {
+      const client = (await resolveLinkedClient(prisma, req.user.userId))?.client;
       if (!client || client.clientId !== Number(req.params.id)) {
         return res.status(403).json({ error: 'Forbidden' });
       }
@@ -98,6 +106,12 @@ router.put('/:id', requireRole(['ADMIN', 'CLIENT']), async (req, res, next) => {
     if (req.body.email && !isEmail(req.body.email)) {
       return res.status(400).json({ error: 'Invalid email' });
     }
+    if (
+      req.body.visibilityScope !== undefined &&
+      !['company', 'user', 'COMPANY', 'USER'].includes(String(req.body.visibilityScope))
+    ) {
+      return res.status(400).json({ error: 'Invalid visibility scope' });
+    }
     const client = await prisma.client.update({
       where: { clientId: Number(req.params.id) },
       data: {
@@ -107,6 +121,12 @@ router.put('/:id', requireRole(['ADMIN', 'CLIENT']), async (req, res, next) => {
         contactPerson: req.body.contactPerson,
         phone: req.body.phone,
         tin: req.body.tin,
+        visibilityScope:
+          req.body.visibilityScope !== undefined
+            ? String(req.body.visibilityScope).toUpperCase() === 'USER'
+              ? 'USER'
+              : 'COMPANY'
+            : undefined,
       },
     });
     await prisma.auditLog.create({

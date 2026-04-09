@@ -1,11 +1,107 @@
 const express = require('express');
 const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse, parseSort } = require('../utils/pagination');
-const { requireAuth, requireRole } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isPositiveInt, isValidDateString } = require('../utils/validate');
 
 const router = express.Router();
 router.use(requireAuth);
+
+const APPROVER_ROLES = ['ADMIN', 'PROJECT_MANAGER', 'PAINT_CHEMIST', 'WAREHOUSE_STAFF'];
+
+function hasRole(req, role) {
+  return getRoleList(req.user).includes(String(role).toUpperCase());
+}
+
+function includeRequestRelations() {
+  return {
+    project: true,
+    requester: true,
+    approver: true,
+    items: {
+      include: {
+        product: {
+          include: {
+            category: true,
+          },
+        },
+      },
+    },
+  };
+}
+
+function areAllPaintItems(request) {
+  return Array.isArray(request?.items) && request.items.length > 0 && request.items.every(
+    (item) => item.product?.category?.categoryName === 'Paint & Consumables'
+  );
+}
+
+async function canAccessProject(req, projectId) {
+  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT')) return true;
+  if (!projectId) return false;
+  const project = await prisma.project.findUnique({ where: { projectId: Number(projectId) } });
+  if (!project) return false;
+  if (hasRole(req, 'PROJECT_MANAGER')) {
+    return project.assignedPmId === req.user.userId;
+  }
+  if (hasRole(req, 'ENGINEER') || hasRole(req, 'PAINT_CHEMIST')) {
+    return true;
+  }
+  return false;
+}
+
+function canApproveRequest(req, request) {
+  if (hasRole(req, 'ADMIN')) return true;
+  if (hasRole(req, 'PROJECT_MANAGER')) {
+    return request.project?.assignedPmId === req.user.userId;
+  }
+  if (hasRole(req, 'PAINT_CHEMIST')) {
+    return areAllPaintItems(request);
+  }
+  if (hasRole(req, 'WAREHOUSE_STAFF')) {
+    return true;
+  }
+  return false;
+}
+
+function getRequestScopeWhere(req) {
+  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT') || hasRole(req, 'WAREHOUSE_STAFF')) {
+    return {};
+  }
+
+  const scopes = [];
+
+  if (hasRole(req, 'PROJECT_MANAGER')) {
+    scopes.push({ project: { assignedPmId: req.user.userId } });
+  }
+
+  if (hasRole(req, 'ENGINEER')) {
+    return {};
+  }
+
+  if (hasRole(req, 'PAINT_CHEMIST')) {
+    scopes.push({
+      AND: [
+        { items: { some: {} } },
+        {
+          items: {
+            every: {
+              product: {
+                category: { categoryName: 'Paint & Consumables' },
+              },
+            },
+          },
+        },
+      ],
+    });
+  }
+
+  if (scopes.length === 0) {
+    return { requestId: -1 };
+  }
+
+  return scopes.length === 1 ? scopes[0] : { OR: scopes };
+}
 
 function mapRequest(r) {
   return {
@@ -38,9 +134,20 @@ function mapRequest(r) {
 
 router.get('/', async (req, res, next) => {
   try {
-    const role = String(req.user?.role || '').toUpperCase();
-    if (role === 'CLIENT') {
+    const roleList = getRoleList(req.user);
+    const isClient = roleList.includes('CLIENT');
+    const isPresident = roleList.includes('PRESIDENT');
+    const isAdmin = roleList.includes('ADMIN');
+    const isProjectManager = roleList.includes('PROJECT_MANAGER');
+    const isEngineer = roleList.includes('ENGINEER');
+    const isPaintChemist = roleList.includes('PAINT_CHEMIST');
+    const isWarehouse = roleList.includes('WAREHOUSE_STAFF');
+
+    if (isClient) {
       return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (!isPresident && !isAdmin && !isProjectManager && !isEngineer && !isPaintChemist && !isWarehouse) {
+      return res.json([]);
     }
     const pagination = parsePagination(req.query);
     const q = req.query.q ? String(req.query.q) : '';
@@ -49,6 +156,7 @@ router.get('/', async (req, res, next) => {
     const onlyDeleted = req.query.onlyDeleted === 'true';
     const where = {
       AND: [
+        getRequestScopeWhere(req),
         onlyDeleted ? { deletedAt: { not: null } } : includeDeleted ? {} : { deletedAt: null },
         q
           ? {
@@ -65,12 +173,7 @@ router.get('/', async (req, res, next) => {
     const orderBy = sort ? { [sort.sortBy]: sort.sortDir } : { createdAt: 'desc' };
     const [requests, total] = await Promise.all([
       prisma.materialRequest.findMany({
-        include: {
-          project: true,
-          requester: true,
-          approver: true,
-          items: { include: { product: true } },
-        },
+        include: includeRequestRelations(),
         where,
         skip: pagination ? (pagination.page - 1) * pagination.pageSize : undefined,
         take: pagination ? pagination.pageSize : undefined,
@@ -90,7 +193,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.post('/', requireRole(['ADMIN', 'PROJECT_MANAGER', 'ENGINEER', 'PAINT_CHEMIST']), async (req, res, next) => {
   try {
     const { projectId, items, purpose, urgency } = req.body;
     const requestNumber = req.body.requestNumber || `REQ-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`;
@@ -101,46 +204,56 @@ router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
     if (urgency && !['LOW', 'NORMAL', 'HIGH', 'CRITICAL'].includes(String(urgency).toUpperCase())) {
       return res.status(400).json({ error: 'Invalid urgency level' });
     }
+    if (!(await canAccessProject(req, projectId))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     let estCost = 0;
     let itemCreates = [];
+    let allPaintItems = true;
     try {
-      itemCreates = Array.isArray(items)
-        ? await Promise.all(
-            items.map(async (item) => {
-              if (Number(item.quantity || 0) <= 0) {
-                throw new Error('Quantity must be greater than 0');
-              }
-              const product = await prisma.product.findUnique({
-                where: { productId: Number(item.itemId || item.productId) },
-              });
-              if (!product) {
-                throw new Error('Invalid product');
-              }
-              estCost += Number(product.unitPrice) * Number(item.quantity || 0);
-              return {
-                productId: item.itemId ? Number(item.itemId) : Number(item.productId),
-                quantity: Number(item.quantity || 0),
-                notes: item.notes || null,
-              };
-            })
-          )
-        : [];
+      itemCreates = await Promise.all(
+        items.map(async (item) => {
+          if (Number(item.quantity || 0) <= 0) {
+            throw new Error('Quantity must be greater than 0');
+          }
+          const product = await prisma.product.findUnique({
+            where: { productId: Number(item.itemId || item.productId) },
+            include: { category: true },
+          });
+          if (!product) {
+            throw new Error('Invalid product');
+          }
+          if (product.category?.categoryName !== 'Paint & Consumables') {
+            allPaintItems = false;
+          }
+          estCost += Number(product.unitPrice) * Number(item.quantity || 0);
+          return {
+            productId: item.itemId ? Number(item.itemId) : Number(item.productId),
+            quantity: Number(item.quantity || 0),
+            notes: item.notes || null,
+          };
+        })
+      );
     } catch (err) {
       return res.status(400).json({ error: err.message || 'Invalid items' });
+    }
+
+    if (hasRole(req, 'PAINT_CHEMIST') && !allPaintItems) {
+      return res.status(403).json({ error: 'Paint chemists can only request paint and consumable items' });
     }
 
     const request = await prisma.materialRequest.create({
       data: {
         requestNumber,
-        projectId: projectId ? Number(projectId) : null,
+        projectId: Number(projectId),
         requestedBy: req.user.userId,
         urgency: urgency ? urgency.toUpperCase() : 'NORMAL',
         estCost,
         purpose: purpose || null,
         items: { create: itemCreates },
       },
-      include: { items: { include: { product: true } }, project: true, requester: true, approver: true },
+      include: includeRequestRelations(),
     });
 
     await prisma.auditLog.create({
@@ -158,7 +271,7 @@ router.post('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
   }
 });
 
-router.put('/:id', requireRole(['ADMIN']), async (req, res, next) => {
+router.put('/:id', requireRole(APPROVER_ROLES), async (req, res, next) => {
   try {
     const status = req.body.status ? req.body.status.toUpperCase() : undefined;
     if (status && !['PENDING', 'APPROVED', 'REJECTED', 'FULFILLED'].includes(status)) {
@@ -167,9 +280,25 @@ router.put('/:id', requireRole(['ADMIN']), async (req, res, next) => {
     if (req.body.requestDate && !isValidDateString(req.body.requestDate)) {
       return res.status(400).json({ error: 'Invalid request date' });
     }
+
+    const existing = await prisma.materialRequest.findUnique({
+      where: { requestId: Number(req.params.id) },
+      include: includeRequestRelations(),
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    if (!canApproveRequest(req, existing)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const remarks = req.body.remarks || null;
-    const approvedAt = status === 'APPROVED' ? new Date() : undefined;
-    const approvedBy = status === 'APPROVED' ? req.user.userId : undefined;
+    const approvedAt = status === 'APPROVED' ? new Date() : status === 'REJECTED' ? null : undefined;
+    const approvedBy = status === 'APPROVED' ? req.user.userId : status === 'REJECTED' ? null : undefined;
+
+    if (status === 'APPROVED' && existing.status === 'APPROVED') {
+      return res.json(mapRequest(existing));
+    }
 
     const request = await prisma.materialRequest.update({
       where: { requestId: Number(req.params.id) },
@@ -179,12 +308,7 @@ router.put('/:id', requireRole(['ADMIN']), async (req, res, next) => {
         approvedAt,
         approvedBy,
       },
-      include: {
-        items: { include: { product: true } },
-        project: true,
-        requester: true,
-        approver: true,
-      },
+      include: includeRequestRelations(),
     });
 
     if (status === 'APPROVED') {
@@ -218,7 +342,7 @@ router.put('/:id', requireRole(['ADMIN']), async (req, res, next) => {
     await prisma.auditLog.create({
       data: {
         userId: req.user.userId,
-        action: 'UPDATE',
+        action: status === 'APPROVED' ? 'APPROVE' : status === 'REJECTED' ? 'REJECT' : 'UPDATE',
         target: 'MaterialRequest',
         details: `Updated request ${request.requestNumber} to ${status || 'UNCHANGED'}`,
       },
@@ -257,6 +381,7 @@ router.put('/:id/restore', requireRole(['ADMIN']), async (req, res, next) => {
     const request = await prisma.materialRequest.update({
       where: { requestId },
       data: { deletedAt: null },
+      include: includeRequestRelations(),
     });
     await prisma.auditLog.create({
       data: {

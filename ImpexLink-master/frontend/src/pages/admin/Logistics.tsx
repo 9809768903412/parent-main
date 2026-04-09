@@ -1,10 +1,9 @@
 import { useEffect, useState } from 'react';
 import { format } from 'date-fns';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table,
   TableBody,
@@ -29,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Search, Eye, Truck, MapPin, Package, CheckCircle, RotateCcw, Upload, FileText, Clock } from 'lucide-react';
+import { Search, Eye, Truck, Package, CheckCircle, RotateCcw, Upload, FileText, Clock, Navigation } from 'lucide-react';
 import type { Delivery, DeliveryStatus } from '@/types';
 import { toast } from '@/hooks/use-toast';
 import { useResource } from '@/hooks/use-resource';
@@ -40,11 +39,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/contexts/AuthContext';
 import { canManageLogistics } from '@/lib/roles';
 import PaginationNav from '@/components/PaginationNav';
+import LiveTrackingDialog from '@/components/LiveTrackingDialog';
 
 const statusColors: Record<DeliveryStatus, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
   'in-transit': 'bg-blue-100 text-blue-800',
   delivered: 'bg-green-100 text-green-800',
+  delayed: 'bg-orange-100 text-orange-800',
   'return-pending': 'bg-orange-100 text-orange-800',
   'return-rejected': 'bg-slate-100 text-slate-700',
   returned: 'bg-red-100 text-red-800',
@@ -56,6 +57,7 @@ const statusIcons: Record<DeliveryStatus, React.ReactNode> = {
   pending: <Package size={16} />,
   'in-transit': <Truck size={16} />,
   delivered: <CheckCircle size={16} />,
+  delayed: <Clock size={16} />,
   'return-pending': <RotateCcw size={16} />,
   'return-rejected': <RotateCcw size={16} />,
   returned: <RotateCcw size={16} />,
@@ -79,6 +81,7 @@ export default function LogisticsPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
+  const [trackingDelivery, setTrackingDelivery] = useState<Delivery | null>(null);
   const [showDRPreview, setShowDRPreview] = useState(false);
   const [receivedBy, setReceivedBy] = useState('');
   const [deliveryNotes, setDeliveryNotes] = useState('');
@@ -156,12 +159,19 @@ export default function LogisticsPage() {
     setDeliveriesPage(1);
   }, [searchTerm, statusFilter, sortKey, sortDir]);
 
-  const pendingCount = deliveries.filter((d) => d.status === 'pending').length;
-  const inTransitCount = deliveries.filter((d) => d.status === 'in-transit').length;
-  const deliveredCount = deliveries.filter((d) => d.status === 'delivered').length;
+  const syncSelectedDelivery = (delivery: Delivery) => {
+    setSelectedDelivery((current) => (current?.id === delivery.id ? delivery : current));
+    setTrackingDelivery((current) => (current?.id === delivery.id ? delivery : current));
+  };
 
-  const handleUpdateStatus = (delId: string, newStatus: DeliveryStatus) => {
-    if (newStatus === 'delivered' && !receivedBy.trim()) {
+  const handleUpdateStatus = async (
+    delId: string,
+    newStatus: DeliveryStatus,
+    meta?: { receivedBy?: string; notes?: string }
+  ) => {
+    const receivedByValue = meta?.receivedBy ?? receivedBy;
+    const notesValue = meta?.notes ?? deliveryNotes;
+    if (newStatus === 'delivered' && !receivedByValue.trim()) {
       toast({
         title: 'Missing receiver',
         description: 'Please enter who received the delivery.',
@@ -169,10 +179,10 @@ export default function LogisticsPage() {
       });
       return;
     }
-    if (newStatus === 'return-pending' && !deliveryNotes.trim()) {
+    if ((newStatus === 'return-pending' || newStatus === 'delayed') && !notesValue.trim()) {
       toast({
-        title: 'Missing return reason',
-        description: 'Please provide a return reason.',
+        title: 'Missing notes',
+        description: 'Please provide delivery notes before continuing.',
         variant: 'destructive',
       });
       return;
@@ -189,12 +199,15 @@ export default function LogisticsPage() {
       if (d.id === delId) {
         const updates: Partial<Delivery> = { status: newStatus };
         if (newStatus === 'delivered') {
-          updates.receivedBy = receivedBy || 'Client Representative';
+          updates.receivedBy = receivedByValue || 'Client Representative';
           updates.receivedAt = new Date().toISOString();
-          updates.notes = deliveryNotes;
+          updates.notes = notesValue;
         }
         if (newStatus === 'return-pending') {
-          updates.notes = deliveryNotes;
+          updates.notes = notesValue;
+        }
+        if (newStatus === 'delayed') {
+          updates.notes = notesValue;
         }
         if (newStatus === 'return-rejected') {
           updates.returnRejectionReason = returnRejectReason;
@@ -206,13 +219,19 @@ export default function LogisticsPage() {
     setDeliveries(updatedDeliveries);
     const updatedDelivery = updatedDeliveries.find((d) => d.id === delId);
     if (updatedDelivery) {
+      syncSelectedDelivery(updatedDelivery);
       const payload: Partial<Delivery> & { returnRejectionReason?: string } = { ...updatedDelivery };
       if (newStatus === 'return-rejected') {
         payload.returnRejectionReason = returnRejectReason;
       }
-      apiClient.put<Delivery>(`/deliveries/${delId}`, payload).catch(() => {
+      try {
+        const response = await apiClient.put<Delivery>(`/deliveries/${delId}`, payload);
+        const savedDelivery = response.data as Delivery;
+        setDeliveries((current) => current.map((delivery) => (delivery.id === delId ? savedDelivery : delivery)));
+        syncSelectedDelivery(savedDelivery);
+      } catch (_err) {
         // Keep optimistic update on UI if API fails
-      });
+      }
     }
     toast({
       title: 'Delivery Updated',
@@ -222,6 +241,21 @@ export default function LogisticsPage() {
     setReceivedBy('');
     setDeliveryNotes('');
     setIsReturnOpen(false);
+  };
+
+  const handleUploadProof = async (deliveryId: string, file: File) => {
+    const formData = new FormData();
+    formData.append('proof', file);
+    const response = await apiClient.post(`/deliveries/${deliveryId}/proof`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    const updated = response.data as Delivery;
+    setDeliveries((current) => current.map((delivery) => (delivery.id === deliveryId ? updated : delivery)));
+    syncSelectedDelivery(updated);
+    toast({
+      title: 'Proof uploaded',
+      description: 'Proof of delivery has been attached successfully.',
+    });
   };
 
   const handlePrintDelivery = (delivery: Delivery) => {
@@ -290,54 +324,9 @@ export default function LogisticsPage() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-foreground">Logistics & Deliveries</h2>
-        <p className="text-muted-foreground">Track and manage delivery receipts</p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <Card>
-          <CardContent className="p-4 flex items-center gap-4">
-            <div className="p-3 rounded-full bg-yellow-100">
-              <Package className="text-yellow-600" size={24} />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{pendingCount}</p>
-              <p className="text-sm text-muted-foreground">Pending</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 flex items-center gap-4">
-            <div className="p-3 rounded-full bg-blue-100">
-              <Truck className="text-blue-600" size={24} />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{inTransitCount}</p>
-              <p className="text-sm text-muted-foreground">In Transit</p>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="p-4 flex items-center gap-4">
-            <div className="p-3 rounded-full bg-green-100">
-              <CheckCircle className="text-green-600" size={24} />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{deliveredCount}</p>
-              <p className="text-sm text-muted-foreground">Delivered</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Tabs defaultValue="deliveries" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="deliveries">All Deliveries</TabsTrigger>
-          <TabsTrigger value="map">GPS Tracking</TabsTrigger>
-          <TabsTrigger value="returns">Returns</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="deliveries" className="space-y-4">
+      <div className="space-y-4">
           <Card>
             <CardContent className="p-4">
               <div className="flex flex-col lg:flex-row lg:items-center gap-3">
@@ -367,6 +356,7 @@ export default function LogisticsPage() {
                     <SelectItem value="all">All Status</SelectItem>
                     <SelectItem value="pending">Pending</SelectItem>
                     <SelectItem value="in-transit">In Transit</SelectItem>
+                    <SelectItem value="delayed">Delayed</SelectItem>
                     <SelectItem value="delivered">Delivered</SelectItem>
                     <SelectItem value="return-pending">Return Pending</SelectItem>
                     <SelectItem value="return-rejected">Return Rejected</SelectItem>
@@ -402,12 +392,9 @@ export default function LogisticsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>DR #</TableHead>
-                    <TableHead>Order #</TableHead>
-                    <TableHead>Client</TableHead>
-                    <TableHead>Project</TableHead>
-                    <TableHead>Items</TableHead>
-                    <TableHead>ETA</TableHead>
+                    <TableHead>Delivery</TableHead>
+                    <TableHead>Client / Project</TableHead>
+                    <TableHead>Details</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
@@ -416,7 +403,7 @@ export default function LogisticsPage() {
                   {deliveriesLoading && deliveries.length === 0 ? (
                     Array.from({ length: 6 }).map((_, idx) => (
                       <TableRow key={`sk-${idx}`}>
-                        <TableCell colSpan={8}>
+                        <TableCell colSpan={5}>
                           <Skeleton className="h-6 w-full" />
                         </TableCell>
                       </TableRow>
@@ -424,14 +411,25 @@ export default function LogisticsPage() {
                   ) : (
                     pagedDeliveries.map((delivery) => (
                     <TableRow key={delivery.id}>
-                      <TableCell className="font-medium">{delivery.drNumber}</TableCell>
-                      <TableCell>{delivery.orderNumber}</TableCell>
-                      <TableCell>{delivery.clientName}</TableCell>
-                      <TableCell className="max-w-[150px] truncate">
-                        {delivery.projectName || '-'}
+                      <TableCell className="py-4">
+                        <div className="min-w-[140px]">
+                          <p className="font-medium text-foreground">{delivery.drNumber}</p>
+                          <p className="text-sm text-muted-foreground">{delivery.orderNumber}</p>
+                        </div>
                       </TableCell>
-                      <TableCell>{delivery.items.length} items</TableCell>
-                      <TableCell>{format(new Date(delivery.eta), 'MMM dd')}</TableCell>
+                      <TableCell className="py-4">
+                        <div className="min-w-[220px]">
+                          <p className="font-medium text-foreground">{delivery.clientName}</p>
+                          <p className="text-sm text-muted-foreground truncate">
+                            {delivery.projectName || 'No linked project'}
+                          </p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-4">
+                        <div className="min-w-[130px] text-sm text-muted-foreground">
+                          {delivery.items.length} items • {format(new Date(delivery.eta), 'MMM dd')}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         {isDelayed(delivery) ? (
                           <Badge className={`${delayedBadge} flex items-center gap-1 w-fit`}>
@@ -446,14 +444,24 @@ export default function LogisticsPage() {
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setSelectedDelivery(delivery)}
-                        >
-                          <Eye size={16} className="mr-1" />
-                          View
-                        </Button>
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-primary/20 text-primary"
+                            onClick={() => setTrackingDelivery(delivery)}
+                          >
+                            <Navigation size={16} className="mr-1" />
+                            Track
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setSelectedDelivery(delivery)}
+                          >
+                            <Eye size={16} />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                     ))
@@ -470,155 +478,7 @@ export default function LogisticsPage() {
               disabled={deliveriesLoading}
             />
           </div>
-        </TabsContent>
-
-        <TabsContent value="map">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <MapPin size={20} />
-                GPS Tracking
-              </CardTitle>
-              <CardDescription>Live tracking of delivery vehicles</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {/* Mock GPS Map */}
-              <div className="aspect-video bg-muted rounded-lg flex items-center justify-center relative overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-green-50">
-                  {/* Mock map grid */}
-                  <div className="absolute inset-0 opacity-20">
-                    {Array.from({ length: 10 }).map((_, i) => (
-                      <div key={i} className="absolute border-b border-gray-400 w-full" style={{ top: `${i * 10}%` }} />
-                    ))}
-                    {Array.from({ length: 10 }).map((_, i) => (
-                      <div key={i} className="absolute border-r border-gray-400 h-full" style={{ left: `${i * 10}%` }} />
-                    ))}
-                  </div>
-                  {/* Mock delivery pins */}
-                  <div className="absolute top-[30%] left-[25%] animate-pulse">
-                    <div className="bg-blue-600 text-white p-2 rounded-full">
-                      <Truck size={16} />
-                    </div>
-                    <div className="text-xs bg-white px-2 py-1 rounded shadow mt-1">
-                      DR-2025-0245 → Ateneo CTC
-                    </div>
-                  </div>
-                  <div className="absolute top-[60%] left-[55%]">
-                    <div className="bg-yellow-600 text-white p-2 rounded-full">
-                      <Package size={16} />
-                    </div>
-                    <div className="text-xs bg-white px-2 py-1 rounded shadow mt-1">
-                      DR-2025-0248 → TikTok
-                    </div>
-                  </div>
-                  <div className="absolute top-[45%] left-[70%]">
-                    <div className="bg-green-600 text-white p-2 rounded-full">
-                      <CheckCircle size={16} />
-                    </div>
-                    <div className="text-xs bg-white px-2 py-1 rounded shadow mt-1">
-                      DR-2025-0234 ✓
-                    </div>
-                  </div>
-                </div>
-                <div className="absolute bottom-4 right-4 bg-white p-3 rounded-lg shadow-lg text-sm">
-                  <p className="font-medium mb-2">Legend</p>
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="w-3 h-3 rounded-full bg-blue-600"></div>
-                    <span>In Transit</span>
-                  </div>
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className="w-3 h-3 rounded-full bg-yellow-600"></div>
-                    <span>Pending</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full bg-green-600"></div>
-                    <span>Delivered</span>
-                  </div>
-                </div>
-              </div>
-              <p className="text-sm text-muted-foreground text-center mt-4">
-                * Mock GPS visualization - Replace with real tracking integration
-              </p>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="returns">
-          <Card>
-            <CardHeader>
-              <CardTitle>Returns</CardTitle>
-              <CardDescription>Manage returned items and failed deliveries</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {deliveries.filter((d) => d.status === 'returned' || d.status === 'return-pending' || d.status === 'return-rejected').length === 0 ? (
-                <p className="text-center text-muted-foreground py-8">No returns at this time</p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>DR #</TableHead>
-                      <TableHead>Client</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Reason</TableHead>
-                      <TableHead>Date</TableHead>
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                  {deliveries
-                    .filter((d) => d.status === 'returned' || d.status === 'return-pending' || d.status === 'return-rejected')
-                    .map((delivery) => (
-                      <TableRow key={delivery.id}>
-                        <TableCell>{delivery.drNumber}</TableCell>
-                        <TableCell>{delivery.clientName}</TableCell>
-                        <TableCell>
-                          <Badge className={statusColors[delivery.status]}>
-                            {delivery.status === 'return-pending'
-                              ? 'return pending'
-                              : delivery.status === 'return-rejected'
-                              ? 'return rejected'
-                              : delivery.status}
-                          </Badge>
-                        </TableCell>
-                        <TableCell>
-                          {delivery.status === 'return-rejected'
-                            ? delivery.returnRejectionReason || 'No reason provided'
-                            : delivery.notes || 'No reason provided'}
-                        </TableCell>
-                        <TableCell>{format(new Date(delivery.eta), 'MMM dd, yyyy')}</TableCell>
-                        <TableCell className="text-right">
-                          {delivery.status === 'return-pending' ? (
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                size="sm"
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                                onClick={() => handleProcessReturn(delivery)}
-                              >
-                                Approve
-                              </Button>
-                              <Button
-                                size="sm"
-                                className="bg-red-600 hover:bg-red-700 text-white"
-                                onClick={() => handleRejectReturn(delivery)}
-                              >
-                                Reject
-                              </Button>
-                            </div>
-                          ) : (
-                            <Button variant="outline" size="sm" onClick={() => setSelectedDelivery(delivery)}>
-                              View
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+      </div>
 
       {/* Delivery Detail Dialog */}
       <Dialog open={!!selectedDelivery} onOpenChange={() => setSelectedDelivery(null)}>
@@ -748,6 +608,14 @@ export default function LogisticsPage() {
                     Confirm Delivery
                   </Button>
                 )}
+                {canManage && (selectedDelivery.status === 'pending' || selectedDelivery.status === 'in-transit') && (
+                  <Button
+                    className="bg-orange-600 hover:bg-orange-700 text-white"
+                    onClick={() => handleUpdateStatus(selectedDelivery.id, 'delayed')}
+                  >
+                    Report Delay
+                  </Button>
+                )}
                 {canManage && selectedDelivery.status === 'return-pending' && (
                   <Button
                     className="bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -761,6 +629,17 @@ export default function LogisticsPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <LiveTrackingDialog
+        delivery={trackingDelivery}
+        open={!!trackingDelivery}
+        onOpenChange={(open) => {
+          if (!open) setTrackingDelivery(null);
+        }}
+        readOnly={!canManage}
+        onStatusUpdate={canManage ? handleUpdateStatus : undefined}
+        onUploadProof={canManage ? handleUploadProof : undefined}
+      />
 
       <Dialog open={isReturnOpen} onOpenChange={setIsReturnOpen}>
         <DialogContent>

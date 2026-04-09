@@ -31,6 +31,8 @@ import {
   ChevronRight,
   Menu,
   X,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -77,6 +79,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const { data: notifications } = useResource<Notification[]>('/notifications', []);
   const { data: companyInfo } = useResource('/company', {
@@ -121,14 +124,22 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
       {/* Sidebar */}
       <aside
         className={cn(
-          'fixed lg:sticky lg:top-0 lg:h-screen inset-y-0 left-0 z-50 w-64 bg-sidebar transform transition-transform duration-200 ease-in-out lg:translate-x-0',
+          'fixed lg:sticky lg:top-0 lg:h-screen inset-y-0 left-0 z-50 bg-sidebar transform transition-[width,transform] duration-200 ease-in-out lg:translate-x-0',
+          sidebarCollapsed ? 'lg:w-[88px]' : 'w-64',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         )}
       >
         <div className="flex flex-col h-full">
           {/* Logo */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-sidebar-border">
-            <Logo size="md" className="text-white [&_span]:text-white" />
+          <div
+            className={cn(
+              'h-16 flex items-center border-b border-sidebar-border',
+              sidebarCollapsed ? 'justify-center px-2 lg:px-3' : 'justify-between px-4'
+            )}
+          >
+            <div className={cn('min-w-0', sidebarCollapsed && 'lg:hidden')}>
+              <Logo size="md" className="text-white [&_span]:text-white" />
+            </div>
             <Button
               variant="ghost"
               size="icon"
@@ -156,18 +167,23 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
                     to={item.path}
                     onClick={() => setSidebarOpen(false)}
                     className={cn(
-                      'flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors',
+                      'relative flex items-center px-3 py-2.5 rounded-md text-sm font-medium transition-colors',
+                      sidebarCollapsed ? 'justify-center gap-0' : 'gap-3',
                       finalActive
                         ? 'bg-sidebar-primary text-sidebar-primary-foreground'
                         : 'text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground'
                     )}
+                    title={sidebarCollapsed ? item.label : undefined}
                   >
                     <item.icon size={20} />
-                    <span>{item.label}</span>
-                    {item.label === 'Notifications' && unreadNotifications > 0 && (
+                    {!sidebarCollapsed && <span>{item.label}</span>}
+                    {!sidebarCollapsed && item.label === 'Notifications' && unreadNotifications > 0 && (
                       <Badge className="ml-auto bg-primary text-primary-foreground text-xs px-1.5 py-0.5">
                         {unreadNotifications}
                       </Badge>
+                    )}
+                    {sidebarCollapsed && item.label === 'Notifications' && unreadNotifications > 0 && (
+                      <span className="absolute top-2 right-2 h-2 w-2 bg-primary rounded-full" />
                     )}
                   </NavLink>
                 );
@@ -175,7 +191,19 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
             </nav>
           </ScrollArea>
 
-          <div className="p-4 border-t border-sidebar-border" />
+          <div className="p-3 border-t border-sidebar-border hidden lg:block">
+            <Button
+              variant="ghost"
+              className={cn(
+                'w-full text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground',
+                sidebarCollapsed ? 'justify-center px-0' : 'justify-start gap-3'
+              )}
+              onClick={() => setSidebarCollapsed((current) => !current)}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+              {!sidebarCollapsed && <span>{sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</span>}
+            </Button>
+          </div>
         </div>
       </aside>
 

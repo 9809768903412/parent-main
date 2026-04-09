@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from '@/api/client';
 import { getCacheEntry, getCache, setCache } from '@/hooks/cache';
 
@@ -12,15 +12,26 @@ export function useResource<T>(
   const key = params ? `${path}?${new URLSearchParams(params as Record<string, string>).toString()}` : path;
   const cachedEntry = getCacheEntry<T>(key);
   const cached = getCache<T>(key, staleTimeMs);
+  const fallbackRef = useRef(fallback);
   const [data, setData] = useState<T>(cached ?? fallback);
   const [loading, setLoading] = useState<boolean>(!cached);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(cachedEntry?.ts || null);
 
+  useEffect(() => {
+    fallbackRef.current = fallback;
+  }, [fallback]);
+
   const fetchData = useCallback(async (force = false) => {
+    if (!path) {
+      setData(fallbackRef.current);
+      setLoading(false);
+      setLastUpdated(Date.now());
+      return;
+    }
     const useMocks = import.meta.env.VITE_USE_MOCKS === 'true';
     if (useMocks) {
-      setData(fallback);
+      setData(fallbackRef.current);
       setLoading(false);
       setLastUpdated(Date.now());
       return;
@@ -43,7 +54,7 @@ export function useResource<T>(
     } finally {
       setLoading(false);
     }
-  }, [fallback, path, staleTimeMs, cached, key, params]);
+  }, [path, staleTimeMs, cached, key, params]);
 
   useEffect(() => {
     fetchData();

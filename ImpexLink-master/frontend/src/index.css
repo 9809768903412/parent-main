@@ -133,6 +133,39 @@
   }
 }
 
+@layer components {
+  .imx-surface {
+    @apply border border-[#eadfd8] bg-[#fffdfa];
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+  }
+
+  .imx-surface-hover {
+    @apply transition-all;
+  }
+
+  .imx-surface-hover:hover {
+    border-color: rgba(192, 57, 43, 0.2);
+    background-color: #fff7f4;
+    box-shadow: 0 12px 32px rgba(192, 57, 43, 0.08);
+  }
+
+  .imx-row-card {
+    @apply min-h-[108px] rounded-3xl;
+  }
+
+  .imx-row-card-lg {
+    @apply h-[76px] rounded-[22px];
+  }
+
+  .imx-grid-card {
+    @apply min-h-[72px] rounded-[22px];
+  }
+
+  .imx-icon-pill {
+    @apply rounded-2xl ring-1;
+  }
+}
+
 /* Gear watermark pattern for login */
 .gear-pattern {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cpath fill='%232F2F2F' fill-opacity='0.05' d='M50 20c-1.5 0-3 .5-4 1.5l-5-2.5c-.5-1.5-2-2.5-3.5-2.5s-3 1-3.5 2.5l-5 2.5c-1-1-2.5-1.5-4-1.5-3 0-5.5 2.5-5.5 5.5 0 1.5.5 3 1.5 4l-2.5 5c-1.5.5-2.5 2-2.5 3.5s1 3 2.5 3.5l2.5 5c-1 1-1.5 2.5-1.5 4 0 3 2.5 5.5 5.5 5.5 1.5 0 3-.5 4-1.5l5 2.5c.5 1.5 2 2.5 3.5 2.5s3-1 3.5-2.5l5-2.5c1 1 2.5 1.5 4 1.5 3 0 5.5-2.5 5.5-5.5 0-1.5-.5-3-1.5-4l2.5-5c1.5-.5 2.5-2 2.5-3.5s-1-3-2.5-3.5l-2.5-5c1-1 1.5-2.5 1.5-4 0-3-2.5-5.5-5.5-5.5zM50 40c5.5 0 10 4.5 10 10s-4.5 10-10 10-10-4.5-10-10 4.5-10 10-10z'/%3E%3C/svg%3E");

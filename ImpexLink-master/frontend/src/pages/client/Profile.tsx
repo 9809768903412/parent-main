@@ -6,6 +6,13 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -30,7 +37,7 @@ export default function ClientProfilePage() {
   const [orders, setOrders] = useState<Order[]>([]);
   
   const client = clients.find((c) => c.id === user?.clientId);
-  const clientOrders = orders.filter((o) => o.clientId === user?.clientId);
+  const clientOrders = orders;
   const totalSpend = clientOrders.reduce((sum, o) => sum + o.total, 0);
 
   const [profileData, setProfileData] = useState({
@@ -46,6 +53,7 @@ export default function ClientProfilePage() {
     name: client?.name || '',
     address: client?.address || '',
     tin: client?.tin || '',
+    visibilityScope: client?.visibilityScope || 'company',
   });
 
   const [notifications, setNotifications] = useState({
@@ -67,12 +75,12 @@ export default function ClientProfilePage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    if (!user?.clientId) return;
+    if (!user?.id) return;
     apiClient
-      .get('/orders', { params: { clientId: user.clientId } })
+      .get('/orders')
       .then((res) => setOrders(res.data?.data || res.data || []))
       .catch(() => setOrders([]));
-  }, [user?.clientId]);
+  }, [user?.id]);
 
   useEffect(() => {
     apiClient
@@ -100,6 +108,7 @@ export default function ClientProfilePage() {
       name: client?.name || '',
       address: client?.address || '',
       tin: client?.tin || '',
+      visibilityScope: client?.visibilityScope || 'company',
     });
   }, [client?.id]);
 
@@ -229,7 +238,9 @@ export default function ClientProfilePage() {
         clientName: companyData.name,
         address: companyData.address,
         email: profileData.email,
+        visibilityScope: companyData.visibilityScope,
       })
+      .then(() => refreshUser())
       .catch(() => {
         // keep optimistic UI
       });
@@ -498,6 +509,26 @@ export default function ClientProfilePage() {
                   className="mt-1"
                   placeholder="XXX-XXX-XXX-XXXXX"
                 />
+              </div>
+              <div>
+                <Label>Order Visibility</Label>
+                <Select
+                  value={companyData.visibilityScope}
+                  onValueChange={(value: 'company' | 'user') =>
+                    setCompanyData({ ...companyData, visibilityScope: value })
+                  }
+                >
+                  <SelectTrigger className="mt-1">
+                    <SelectValue placeholder="Choose visibility" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="company">Company-wide</SelectItem>
+                    <SelectItem value="user">My own only</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Company-wide shows all orders and deliveries for your company. My own only shows just the records you created.
+                </p>
               </div>
 
               <div className="flex justify-end pt-2">

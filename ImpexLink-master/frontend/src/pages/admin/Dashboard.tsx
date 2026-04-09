@@ -1,512 +1,749 @@
-import { Package, AlertTriangle, FolderKanban, ClipboardList, Truck, TrendingUp, TrendingDown, ShoppingCart } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { useResource } from '@/hooks/use-resource';
-import type { InventoryItem, StockTransaction, Delivery } from '@/types';
-import { cn } from '@/lib/utils';
-import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  ArrowRight,
+  BarChart3,
+  ClipboardList,
+  FileText,
+  FolderKanban,
+  Package,
+  Paintbrush2,
+  Shield,
+  ShoppingCart,
+  Truck,
+  Warehouse,
+  Wrench,
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { useAuth } from '@/contexts/AuthContext';
+import { useResource } from '@/hooks/use-resource';
+import { apiClient } from '@/api/client';
+import type {
+  Delivery,
+  InventoryItem,
+  MaterialRequest,
+  Order,
+  Project,
+  QuoteRequest,
+  StockTransaction,
+  UserRole,
+} from '@/types';
 
 type DashboardStats = {
-  totalItems: number;
-  lowStockCount: number;
-  activeProjects: number;
   pendingRequests: number;
-  ongoingDeliveries: number;
-  totalItemsDelta: number;
-  totalItemsPercent: number | null;
-  lowStockDelta: number;
-  lowStockPercent: number | null;
-  activeProjectsDelta: number;
-  activeProjectsPercent: number | null;
   pendingRequestsDelta: number;
   pendingRequestsPercent: number | null;
-  ongoingDeliveriesDelta: number;
-  ongoingDeliveriesPercent: number | null;
   rangeDays: number;
 };
 
-export default function AdminDashboard() {
+const rolePriority: UserRole[] = [
+  'president',
+  'admin',
+  'project_manager',
+  'sales_agent',
+  'engineer',
+  'paint_chemist',
+  'warehouse_staff',
+  'delivery_guy',
+];
+
+function formatPeso(value: number) {
+  return `₱${value.toLocaleString('en-PH', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function getRoleLabel(role: UserRole) {
+  switch (role) {
+    case 'president':
+      return 'Executive Overview';
+    case 'admin':
+      return 'Operational Control';
+    case 'project_manager':
+      return 'Project Focus';
+    case 'sales_agent':
+      return 'Sales & Client Focus';
+    case 'engineer':
+      return 'Technical Requests';
+    case 'paint_chemist':
+      return 'Paint-Specific View';
+    case 'warehouse_staff':
+      return 'Warehouse Operations';
+    case 'delivery_guy':
+      return 'Logistics View';
+    default:
+      return 'Operations';
+  }
+}
+
+function QuickLinkCard({
+  title,
+  description,
+  icon: Icon,
+  onClick,
+}: {
+  title: string;
+  description: string;
+  icon: typeof ClipboardList;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="imx-surface imx-surface-hover imx-row-card-lg w-full px-5 py-5 text-left"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="space-y-2">
+          <div className="w-fit rounded-2xl bg-muted/80 p-3">
+            <Icon size={20} />
+          </div>
+          <div>
+            <p className="font-semibold">{title}</p>
+            <p className="text-sm text-muted-foreground">{description}</p>
+          </div>
+        </div>
+        <ArrowRight size={16} className="mt-1 text-muted-foreground" />
+      </div>
+    </button>
+  );
+}
+
+export default function StaffDashboard() {
   const navigate = useNavigate();
-  const { data: inventory, lastUpdated } = useResource<InventoryItem[]>('/inventory', []);
-  const { data: transactions } = useResource<StockTransaction[]>('/transactions', []);
-  const { data: deliveries } = useResource<Delivery[]>('/deliveries', []);
-  const { data: stats } = useResource<DashboardStats>('/dashboard/stats', {
-    totalItems: 0,
-    lowStockCount: 0,
-    activeProjects: 0,
+  const { user } = useAuth();
+  const roleList = useMemo<UserRole[]>(
+    () => (user?.roles?.length ? user.roles : user?.role ? [user.role] : []),
+    [user?.role, user?.roles]
+  );
+  const effectiveRole = rolePriority.find((role) => roleList.includes(role)) || 'admin';
+  const needsStats = ['president', 'admin'].includes(effectiveRole);
+  const needsRequests = ['admin', 'project_manager', 'engineer', 'paint_chemist', 'warehouse_staff', 'president'].includes(effectiveRole);
+  const needsInventory = ['admin', 'engineer', 'paint_chemist', 'warehouse_staff'].includes(effectiveRole);
+  const needsProjects = ['president', 'project_manager', 'engineer'].includes(effectiveRole);
+  const needsOrders = ['president', 'admin', 'project_manager', 'sales_agent', 'engineer'].includes(effectiveRole);
+  const needsDeliveries = ['president', 'delivery_guy'].includes(effectiveRole);
+  const needsTransactions = ['warehouse_staff'].includes(effectiveRole);
+  const needsQuotes = ['admin', 'sales_agent'].includes(effectiveRole);
+
+  const { data: stats } = useResource<DashboardStats>(needsStats ? '/dashboard/stats' : '', {
     pendingRequests: 0,
-    ongoingDeliveries: 0,
-    totalItemsDelta: 0,
-    totalItemsPercent: 0,
-    lowStockDelta: 0,
-    lowStockPercent: 0,
-    activeProjectsDelta: 0,
-    activeProjectsPercent: 0,
     pendingRequestsDelta: 0,
     pendingRequestsPercent: 0,
-    ongoingDeliveriesDelta: 0,
-    ongoingDeliveriesPercent: 0,
     rangeDays: 30,
   });
-  const totalItems = stats.totalItems || inventory.reduce((acc, item) => acc + item.qtyOnHand, 0);
-  const lowStockItemsCount =
-    stats.lowStockCount ||
-    inventory.filter((item) => item.status === 'low-stock' || item.status === 'out-of-stock').length;
+  const { data: requests } = useResource<MaterialRequest[]>(needsRequests ? '/material-requests' : '', []);
+  const { data: inventory } = useResource<InventoryItem[]>(needsInventory ? '/inventory' : '', []);
+  const { data: projects } = useResource<Project[]>(needsProjects ? '/projects' : '', []);
+  const { data: orders } = useResource<Order[]>(needsOrders ? '/orders' : '', []);
+  const { data: deliveries } = useResource<Delivery[]>(needsDeliveries ? '/deliveries' : '', []);
+  const { data: transactions } = useResource<StockTransaction[]>(needsTransactions ? '/transactions' : '', []);
+  const [quotes, setQuotes] = useState<QuoteRequest[]>([]);
+
+  useEffect(() => {
+    if (!needsQuotes) {
+      setQuotes([]);
+      return;
+    }
+    apiClient
+      .get('/quote-requests')
+      .then((res) => setQuotes(res.data?.data || res.data || []))
+      .catch(() => setQuotes([]));
+  }, [effectiveRole, needsQuotes]);
+
+  const pendingRequests = requests
+    .filter((request) => request.status === 'pending')
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
   const lowStockItems = inventory
-    .filter((item) => item.qtyOnHand <= item.minStock)
-    .sort((a, b) => {
-      const aRatio = a.minStock ? a.qtyOnHand / a.minStock : 1;
-      const bRatio = b.minStock ? b.qtyOnHand / b.minStock : 1;
-      return aRatio - bRatio;
-    })
-    .slice(0, 10);
-  const lowStockValue = lowStockItems.reduce((sum, item) => sum + item.qtyOnHand * item.unitPrice, 0);
-  const outOfStockCount = inventory.filter((item) => item.qtyOnHand === 0).length;
-  const criticalCount = inventory.filter((item) => item.minStock > 0 && item.qtyOnHand <= Math.floor(item.minStock * 0.2)).length;
+    .filter((item) => item.status === 'low-stock' || item.status === 'out-of-stock')
+    .sort((a, b) => a.qtyOnHand - b.qtyOnHand);
 
-  const now = new Date();
-  const last30 = new Date(now);
-  last30.setDate(now.getDate() - 30);
-  const usageByItem = new Map<string, number>();
-  transactions.forEach((txn) => {
-    if (!txn.itemId) return;
-    const date = new Date(txn.date);
-    if (Number.isNaN(date.getTime()) || date < last30) return;
-    if (txn.type !== 'issue') return;
-    const prev = usageByItem.get(txn.itemId) || 0;
-    usageByItem.set(txn.itemId, prev + Math.abs(txn.qtyChange));
-  });
+  const recentActivity = [...requests]
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+    .slice(0, 5);
 
-  const movers = inventory.map((item) => ({
-    item,
-    usage: usageByItem.get(item.id) || 0,
+  const myOrders = orders.filter((order) => order.createdBy === user?.id);
+  const myRequests = requests.filter((request) => request.requestedById === user?.id);
+  const engineerVisibleRequests = requests;
+  const pendingQuotes = quotes.filter((quote) => quote.status === 'pending');
+  const scopedProjectIds = new Set(projects.map((project) => project.id));
+  const pmRequests = requests.filter((request) => scopedProjectIds.has(request.projectId));
+  const projectCostOverview = projects.slice(0, 5).map((project) => ({
+    id: project.id,
+    name: project.name,
+    totalCost: orders
+      .filter((order) => order.projectId === project.id)
+      .reduce((sum, order) => sum + order.total, 0),
   }));
-  const fastMovers = [...movers].sort((a, b) => b.usage - a.usage).slice(0, 5);
-  const slowMovers = [...movers].sort((a, b) => a.usage - b.usage).slice(0, 5);
+  const engineerProjects = projects;
+  const paintInventory = inventory.filter((item) => item.category === 'Paint & Consumables');
+  const paintRequestIds = new Set(
+    requests
+      .filter((request) =>
+        request.items.length > 0 &&
+        request.items.every((item) =>
+          inventory.find((inventoryItem) => inventoryItem.id === item.itemId)?.category === 'Paint & Consumables'
+        )
+      )
+      .map((request) => request.id)
+  );
+  const paintRequests = requests.filter((request) => paintRequestIds.has(request.id));
+  const activeDeliveries = deliveries.filter((delivery) =>
+    ['pending', 'in-transit'].includes(delivery.status)
+  );
 
-  const overdueDeliveries = deliveries
-    .filter((d) => (d.status === 'pending' || d.status === 'in-transit') && d.eta)
-    .filter((d) => new Date(d.eta) < now)
-    .sort((a, b) => new Date(a.eta).getTime() - new Date(b.eta).getTime())
-    .slice(0, 5)
-    .map((d) => ({
-      ...d,
-      daysLate: Math.max(0, Math.floor((now.getTime() - new Date(d.eta).getTime()) / (1000 * 60 * 60 * 24))),
-    }));
+  const renderPresidentDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.3fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>All Projects Summary</CardTitle>
+            <CardDescription>High-level view of project status across the company</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              { label: 'Pending', value: projects.filter((project) => project.status === 'pending').length },
+              { label: 'Active', value: projects.filter((project) => project.status === 'active').length },
+              { label: 'On Hold', value: projects.filter((project) => project.status === 'on-hold').length },
+              { label: 'Completed', value: projects.filter((project) => project.status === 'completed').length },
+            ].map((item) => (
+              <div key={item.label} className="rounded-xl border p-4">
+                <p className="text-sm text-muted-foreground">{item.label}</p>
+                <p className="mt-2 text-2xl font-bold">{item.value}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
 
-  const etaSoon = deliveries.filter((d) => d.eta).filter((d) => {
-    const eta = new Date(d.eta);
-    const diff = (eta.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
-    return diff >= 0 && diff <= 2;
-  });
+        <div className="grid gap-4">
+          <QuickLinkCard
+            title="Reports"
+            description="Open company reporting and summary views."
+            icon={BarChart3}
+            onClick={() => navigate('/admin/reports')}
+          />
+          <QuickLinkCard
+            title="AI Insights"
+            description="Review AI recommendations and operational signals."
+            icon={Shield}
+            onClick={() => navigate('/admin/ai-insights')}
+          />
+          <QuickLinkCard
+            title="Audit Logs"
+            description="Inspect system-wide audit trails and accountability records."
+            icon={FileText}
+            onClick={() => navigate('/admin/audit-logs')}
+          />
+        </div>
+      </div>
+    </div>
+  );
 
-  const returns = deliveries.filter((d) => d.status === 'returned');
-  const returnReasons = returns
-    .map((d) => d.notes || 'Unspecified reason')
-    .reduce<Record<string, number>>((acc, reason) => {
-      acc[reason] = (acc[reason] || 0) + 1;
-      return acc;
-    }, {});
-  const topReturnReasons = Object.entries(returnReasons)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 3);
+  const renderAdminDashboard = () => (
+    <div className="space-y-6">
+      <Card className="rounded-2xl border shadow-sm">
+        <CardContent className="flex flex-col gap-5 p-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-4">
+            <div className="rounded-2xl bg-amber-100 p-3">
+              <ClipboardList className="h-6 w-6 text-amber-700" />
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm text-muted-foreground">Pending Requests</p>
+              <h2 className="text-3xl font-bold">{stats.pendingRequests || pendingRequests.length}</h2>
+              <p className="text-sm text-muted-foreground">
+                Priority approvals waiting for operational review.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col items-start gap-3 lg:items-end">
+            {stats.pendingRequestsPercent !== null && stats.pendingRequestsPercent !== 0 && (
+              <Badge variant="outline" className="text-xs">
+                {stats.pendingRequestsDelta >= 0 ? '+' : ''}
+                {stats.pendingRequestsPercent}% vs last {stats.rangeDays} days
+              </Badge>
+            )}
+            <Button onClick={() => navigate('/admin/requests')} className="bg-[#C0392B] text-white hover:bg-[#A93226]">
+              Review Material Requests
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
-  const handleAddToPO = (item: InventoryItem) => {
-    try {
-      const raw = localStorage.getItem('po_suggestions');
-      const list = raw ? JSON.parse(raw) : [];
-      const suggestedQty = Math.max(item.minStock * 2 - item.qtyOnHand, item.minStock);
-      list.push({ itemId: item.id, itemName: item.name, suggestedQty });
-      localStorage.setItem('po_suggestions', JSON.stringify(list));
-      navigate('/admin/purchase-orders');
-    } catch {
-      navigate('/admin/purchase-orders');
-    }
-  };
+      <div className="grid gap-6 xl:grid-cols-[1.3fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Pending Request Queue</CardTitle>
+            <CardDescription>Latest material requests waiting for action</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Request ID</TableHead>
+                  <TableHead>Project</TableHead>
+                  <TableHead>Requested By</TableHead>
+                  <TableHead>Date</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pendingRequests.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                      No pending requests right now.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  pendingRequests.slice(0, 8).map((request) => (
+                    <TableRow key={request.id} className="cursor-pointer" onClick={() => navigate('/admin/requests')}>
+                      <TableCell className="font-medium">{request.requestNumber}</TableCell>
+                      <TableCell>{request.projectName}</TableCell>
+                      <TableCell>{request.requestedBy}</TableCell>
+                      <TableCell>{new Date(request.date).toLocaleDateString('en-PH')}</TableCell>
+                      <TableCell>
+                        <Badge className="bg-orange-100 text-orange-800 hover:bg-orange-100">Pending</Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
 
-  const handleCreatePO = () => {
-    try {
-      const items = lowStockItems.map((item) => ({
-        itemId: item.id,
-        itemName: item.name,
-        suggestedQty: Math.max(item.minStock * 2 - item.qtyOnHand, item.minStock),
-      }));
-      localStorage.setItem('po_suggestions', JSON.stringify(items));
-    } catch {
-      // ignore
-    }
-    navigate('/admin/purchase-orders');
-  };
-
-  const statCards = [
-    {
-      title: 'Total Items',
-      value: totalItems.toLocaleString(),
-      icon: Package,
-      color: 'text-primary',
-      bgColor: 'bg-primary/10',
-      delta: stats.totalItemsDelta,
-      percent: stats.totalItemsPercent,
-      showChange: stats.totalItemsPercent !== null && stats.totalItemsPercent !== 0,
-    },
-    {
-      title: 'Low Stock Alerts',
-      value: lowStockItemsCount.toString(),
-      icon: AlertTriangle,
-      color: 'text-destructive',
-      bgColor: 'bg-destructive/10',
-      delta: stats.lowStockDelta,
-      percent: stats.lowStockPercent,
-      showChange: stats.lowStockPercent !== null && stats.lowStockPercent !== 0,
-    },
-    {
-      title: 'Active Projects',
-      value: stats.activeProjects.toString(),
-      icon: FolderKanban,
-      color: 'text-info',
-      bgColor: 'bg-info/10',
-      delta: stats.activeProjectsDelta,
-      percent: stats.activeProjectsPercent,
-      showChange: stats.activeProjectsPercent !== null && stats.activeProjectsPercent !== 0,
-    },
-    {
-      title: 'Pending Requests',
-      value: stats.pendingRequests.toString(),
-      icon: ClipboardList,
-      color: 'text-secondary',
-      bgColor: 'bg-secondary/10',
-      delta: stats.pendingRequestsDelta,
-      percent: stats.pendingRequestsPercent,
-      showChange: stats.pendingRequestsPercent !== null && stats.pendingRequestsPercent !== 0,
-    },
-    {
-      title: 'Ongoing Deliveries',
-      value: stats.ongoingDeliveries.toString(),
-      icon: Truck,
-      color: 'text-success',
-      bgColor: 'bg-success/10',
-      delta: stats.ongoingDeliveriesDelta,
-      percent: stats.ongoingDeliveriesPercent,
-      showChange: stats.ongoingDeliveriesPercent !== null && stats.ongoingDeliveriesPercent !== 0,
-    },
-  ];
-
-  return (
-    <div className="space-y-6 animate-fade-in">
-      {lastUpdated && (
-        <p className="text-xs text-muted-foreground">
-          Last updated {new Date(lastUpdated).toLocaleTimeString()}
-        </p>
-      )}
-      {/* Stat Cards */}
-      <TooltipProvider>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-          {statCards.map((stat) => (
-          <Card key={stat.title} className="relative overflow-hidden rounded-lg shadow-md border">
-            <CardContent className="p-4">
-              <div className="flex items-start justify-between">
-                <div>
-                  <UITooltip>
-                    <TooltipTrigger asChild>
-                      <p className="text-sm text-muted-foreground cursor-help">{stat.title}</p>
-                    </TooltipTrigger>
-                    <TooltipContent>{`Comparison window: last ${stats.rangeDays} days`}</TooltipContent>
-                  </UITooltip>
-                  <p className="text-2xl font-bold mt-1">{stat.value}</p>
-                  {stat.showChange && (
-                    <div className="flex items-center gap-1 mt-2">
-                      {stat.delta >= 0 ? (
-                        <TrendingUp size={14} className="text-success" />
-                      ) : (
-                        <TrendingDown size={14} className="text-destructive" />
-                      )}
-                      <span
-                        className={cn(
-                          'text-xs font-medium',
-                          stat.delta >= 0 ? 'text-success' : 'text-destructive'
-                        )}
-                      >
-                        {stat.percent === null ? 'new' : `${stat.delta >= 0 ? '+' : ''}${stat.percent}%`}
-                      </span>
-                      <span className="text-xs text-muted-foreground">vs last {stats.rangeDays} days</span>
-                    </div>
-                  )}
+        <div className="space-y-6">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Inventory Overview</CardTitle>
+              <CardDescription>Quick operational stock summary</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border p-4">
+                  <p className="text-sm text-muted-foreground">Low Stock</p>
+                  <p className="mt-1 text-2xl font-bold">{lowStockItems.length}</p>
                 </div>
-                <div className={cn('p-2 rounded-lg shadow-sm', stat.bgColor)}>
-                  <stat.icon size={20} className={stat.color} />
+                <div className="rounded-xl border p-4">
+                  <p className="text-sm text-muted-foreground">Inventory Value</p>
+                  <p className="mt-1 text-2xl font-bold">
+                    {formatPeso(inventory.reduce((sum, item) => sum + item.qtyOnHand * item.unitPrice, 0))}
+                  </p>
                 </div>
               </div>
+              <Button variant="ghost" className="w-full" onClick={() => navigate('/admin/inventory')}>
+                Open Inventory
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
             </CardContent>
           </Card>
-          ))}
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Recent Activity</CardTitle>
+              <CardDescription>Latest request activity across the team</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {recentActivity.slice(0, 4).map((request) => (
+                <div key={request.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{request.requestNumber}</p>
+                  <p className="text-sm text-muted-foreground">{request.projectName}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
         </div>
-      </TooltipProvider>
+      </div>
+    </div>
+  );
 
-      {/* Inventory Actions */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card className="rounded-lg shadow-md border">
+  const renderProjectManagerDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
           <CardHeader>
-            <CardTitle className="text-lg">Low-Stock Risk</CardTitle>
-            <CardDescription>Top items needing immediate action</CardDescription>
+            <CardTitle>My Projects</CardTitle>
+            <CardDescription>Projects currently assigned to you</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex justify-end">
-              <Button size="sm" onClick={handleCreatePO} className="gap-2 bg-red-500 hover:bg-red-600 hover:scale-[1.02] transition">
-                <ShoppingCart size={14} />
-                Create PO
+            {projects.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No projects assigned right now.</p>
+            ) : (
+              projects.map((project) => (
+                <div key={project.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                  <div>
+                    <p className="font-medium">{project.name}</p>
+                    <p className="text-sm text-muted-foreground">{project.clientName}</p>
+                  </div>
+                  <Badge className="capitalize bg-slate-100 text-slate-700 hover:bg-slate-100">
+                    {project.status}
+                  </Badge>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>My Material Requests</CardTitle>
+              <CardDescription>Requests tied to your scoped projects</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {pmRequests.slice(0, 4).map((request) => (
+                <div key={request.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{request.requestNumber}</p>
+                  <p className="text-sm text-muted-foreground">{request.projectName}</p>
+                </div>
+              ))}
+              <Button variant="ghost" className="w-full" onClick={() => navigate('/admin/requests')}>
+                Open Material Requests
+                <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
-            </div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Item</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
-                  <TableHead className="text-right">Min</TableHead>
-                  <TableHead className="text-right">Suggested PO</TableHead>
-                  <TableHead className="text-right">Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {lowStockItems.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={5} className="text-center text-muted-foreground py-6">
-                      No low-stock items
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  lowStockItems.map((item) => {
-                    const suggested = Math.max(item.minStock * 2 - item.qtyOnHand, item.minStock);
-                    const ratio = item.minStock ? Math.min(1, item.qtyOnHand / item.minStock) : 1;
-                    return (
-                      <TableRow key={item.id}>
-                        <TableCell className="font-medium">
-                          <div className="flex items-center gap-2">
-                            <AlertTriangle size={14} className="text-orange-500" />
-                            {item.name}
-                          </div>
-                          <div className="mt-2 h-2 w-full rounded-full bg-muted">
-                            <div
-                              className={cn('h-2 rounded-full', ratio < 0.2 ? 'bg-red-500' : ratio < 0.5 ? 'bg-orange-500' : 'bg-amber-500')}
-                              style={{ width: `${Math.max(5, ratio * 100)}%` }}
-                            />
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-right">{item.qtyOnHand}</TableCell>
-                        <TableCell className="text-right">{item.minStock}</TableCell>
-                        <TableCell className="text-right">{suggested}</TableCell>
-                        <TableCell className="text-right">
-                          <Button variant="outline" size="sm" className="hover:bg-red-50 hover:text-red-600" onClick={() => handleAddToPO(item)}>
-                            Add to PO
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
 
-        <Card className="rounded-lg shadow-md border">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Project Cost Overview</CardTitle>
+              <CardDescription>Estimated value of project-linked orders</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {projectCostOverview.slice(0, 4).map((project) => (
+                <div key={project.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                  <span className="font-medium">{project.name}</span>
+                  <span className="text-sm font-semibold">{formatPeso(project.totalCost)}</span>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderSalesAgentDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
           <CardHeader>
-            <CardTitle className="text-lg">Value at Risk</CardTitle>
-            <CardDescription>Critical inventory exposure</CardDescription>
+            <CardTitle>My Client Orders</CardTitle>
+            <CardDescription>Orders you created or currently manage</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="p-3 rounded-lg border shadow-sm flex items-center justify-between">
-              <div>
-                <p className="text-sm text-muted-foreground">Low-stock value</p>
-                <p className={cn('text-3xl font-bold', lowStockValue > 50000 ? 'text-red-600' : 'text-foreground')}>
-                  ₱{lowStockValue.toLocaleString()}
-                </p>
-              </div>
-              <Badge variant="outline">Value</Badge>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="p-3 rounded-lg border shadow-sm">
-                <p className="text-sm text-muted-foreground">Out of stock</p>
-                <p className="text-xl font-bold">{outOfStockCount}</p>
-              </div>
-              <div className="p-3 rounded-lg border shadow-sm">
-                <p className="text-sm text-muted-foreground">Critical SKUs</p>
-                <p className="text-xl font-bold">{criticalCount}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card className="rounded-lg shadow-md border">
-          <CardHeader>
-            <CardTitle className="text-lg">Fast Movers (30 days)</CardTitle>
-            <CardDescription>Most issued items</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Item</TableHead>
-                  <TableHead className="text-right">Issued Qty</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {fastMovers.map((row) => (
-                  <TableRow key={row.item.id}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        <TrendingUp size={14} className="text-green-600" />
-                        {row.item.name}
-                      </div>
-                      <div className="mt-2 h-2 w-full rounded-full bg-muted">
-                        <div
-                          className="h-2 rounded-full bg-green-500"
-                          style={{ width: `${Math.min(100, row.usage * 5)}%` }}
-                        />
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-semibold text-green-700">{row.usage}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-        <Card className="rounded-lg shadow-md border">
-          <CardHeader>
-            <CardTitle className="text-lg">Slow Movers (30 days)</CardTitle>
-            <CardDescription>Low turnover items</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Item</TableHead>
-                  <TableHead className="text-right">Issued Qty</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {slowMovers.map((row) => (
-                  <TableRow key={row.item.id}>
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        <TrendingDown size={14} className="text-amber-600" />
-                        {row.item.name}
-                      </div>
-                      <div className="mt-2 h-2 w-full rounded-full bg-muted">
-                        <div
-                          className="h-2 rounded-full bg-amber-500"
-                          style={{ width: `${Math.min(100, Math.max(5, row.usage * 5))}%` }}
-                        />
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right font-semibold text-amber-700">{row.usage}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <Card className="rounded-lg shadow-md border">
-          <CardHeader>
-            <CardTitle className="text-lg">Overdue Deliveries</CardTitle>
-            <CardDescription>Action needed</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>DR #</TableHead>
-                  <TableHead>Client</TableHead>
-                  <TableHead className="text-right">Days Late</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {overdueDeliveries.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={3} className="text-center text-muted-foreground py-6">
-                      No overdue deliveries
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  overdueDeliveries.map((d) => (
-                    <TableRow key={d.id}>
-                      <TableCell className="font-medium text-red-700">{d.drNumber}</TableCell>
-                      <TableCell>{d.clientName}</TableCell>
-                      <TableCell className="text-right font-semibold text-red-600">{d.daysLate}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+            {myOrders.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No client orders assigned to you yet.</p>
+            ) : (
+              myOrders.slice(0, 6).map((order) => (
+                <div key={order.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                  <div>
+                    <p className="font-medium">{order.orderNumber}</p>
+                    <p className="text-sm text-muted-foreground">{order.clientName}</p>
+                  </div>
+                  <Badge className="capitalize bg-slate-100 text-slate-700 hover:bg-slate-100">
+                    {order.status}
+                  </Badge>
+                </div>
+              ))
+            )}
           </CardContent>
         </Card>
 
-        <Card className="rounded-lg shadow-md border">
-          <CardHeader>
-            <CardTitle className="text-lg">ETA Today + Tomorrow</CardTitle>
-            <CardDescription>Incoming deliveries</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>DR #</TableHead>
-                  <TableHead>ETA</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {etaSoon.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={2} className="text-center text-muted-foreground py-6">
-                      No upcoming deliveries
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  etaSoon.map((d) => (
-                    <TableRow key={d.id}>
-                      <TableCell className="font-medium">{d.drNumber}</TableCell>
-                      <TableCell>{d.eta ? new Date(d.eta).toLocaleDateString('en-PH') : '—'}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-lg shadow-md border">
-          <CardHeader>
-            <CardTitle className="text-lg">Return / Incident Alerts</CardTitle>
-            <CardDescription>Recent returns</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="p-3 rounded-lg border">
-              <p className="text-sm text-muted-foreground">Returns</p>
-              <p className="text-2xl font-bold">{returns.length}</p>
-            </div>
-            <div className="space-y-2">
-              {topReturnReasons.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No return reasons logged</p>
+        <div className="space-y-6">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Pending Quotes</CardTitle>
+              <CardDescription>Quotation requests waiting for action</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {pendingQuotes.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No pending quotes right now.</p>
               ) : (
-                topReturnReasons.map(([reason, count]) => (
-                  <div key={reason} className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">{reason}</span>
-                    <Badge variant="outline">{count}</Badge>
+                pendingQuotes.slice(0, 4).map((quote) => (
+                  <div key={quote.id} className="rounded-xl border px-4 py-3">
+                    <p className="font-medium">{quote.clientName}</p>
+                    <p className="text-sm text-muted-foreground">{quote.projectName || 'General request'}</p>
                   </div>
                 ))
               )}
-            </div>
+              <Button variant="ghost" className="w-full" onClick={() => navigate('/admin/orders')}>
+                Open Quotes
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Client Activity</CardTitle>
+              <CardDescription>Recent account movement from your order book</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {myOrders.slice(0, 4).map((order) => (
+                <div key={order.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{order.clientName}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {order.projectName || 'No project'} • {formatPeso(order.total)}
+                  </p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderEngineerDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Inventory Overview</CardTitle>
+            <CardDescription>Current material visibility for engineering requests</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {inventory.slice(0, 6).map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                <div>
+                  <p className="font-medium">{item.name}</p>
+                  <p className="text-sm text-muted-foreground">{item.category}</p>
+                </div>
+                <span className="text-sm font-semibold">{item.qtyOnHand} {item.unit}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Project Material Requests</CardTitle>
+              <CardDescription>Requests across active engineering work</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {engineerVisibleRequests.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No material requests available right now.</p>
+              ) : (
+              engineerVisibleRequests.slice(0, 4).map((request) => (
+                <div key={request.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{request.requestNumber}</p>
+                  <p className="text-sm text-muted-foreground">{request.projectName}</p>
+                </div>
+              )))}
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Engineering Projects</CardTitle>
+              <CardDescription>Projects currently visible for engineering work</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {engineerProjects.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No projects available right now.</p>
+              ) : (
+              engineerProjects.slice(0, 4).map((project) => (
+                <div key={project.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{project.name}</p>
+                  <p className="text-sm text-muted-foreground">{project.clientName}</p>
+                </div>
+              )))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderPaintChemistDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Paint & Consumables Inventory</CardTitle>
+            <CardDescription>Items relevant to paint and coating work</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {paintInventory.slice(0, 8).map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                <div>
+                  <p className="font-medium">{item.name}</p>
+                  <p className="text-sm text-muted-foreground">{formatPeso(item.unitPrice)} / {item.unit}</p>
+                </div>
+                <span className="text-sm font-semibold">{item.qtyOnHand}</span>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Paint-related Requests</CardTitle>
+            <CardDescription>Material requests limited to paint category items</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {paintRequests.slice(0, 5).map((request) => (
+              <div key={request.id} className="rounded-xl border px-4 py-3">
+                <p className="font-medium">{request.requestNumber}</p>
+                <p className="text-sm text-muted-foreground">{request.projectName}</p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       </div>
+    </div>
+  );
+
+  const renderWarehouseDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Low Stock Items</CardTitle>
+            <CardDescription>Items needing warehouse attention first</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {lowStockItems.slice(0, 8).map((item) => (
+              <div key={item.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                <div>
+                  <p className="font-medium">{item.name}</p>
+                  <p className="text-sm text-muted-foreground">{item.category}</p>
+                </div>
+                <Badge className="bg-red-100 text-red-800 hover:bg-red-100">
+                  {item.qtyOnHand} {item.unit}
+                </Badge>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Pending Material Requests</CardTitle>
+              <CardDescription>Warehouse queue needing fulfillment</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {pendingRequests.slice(0, 5).map((request) => (
+                <div key={request.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium">{request.requestNumber}</p>
+                  <p className="text-sm text-muted-foreground">{request.projectName}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-2xl">
+            <CardHeader>
+              <CardTitle>Stock Movement</CardTitle>
+              <CardDescription>Latest stock transactions</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {transactions.slice(0, 5).map((transaction) => (
+                <div key={transaction.id} className="rounded-xl border px-4 py-3">
+                  <p className="font-medium capitalize">{transaction.type}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {transaction.date} • Balance {transaction.newBalance}
+                  </p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderDeliveryDashboard = () => (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>My Assigned Deliveries</CardTitle>
+            <CardDescription>Current logistics queue for dispatch and transit updates</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {activeDeliveries.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No active deliveries assigned right now.</p>
+            ) : (
+              activeDeliveries.slice(0, 8).map((delivery) => (
+                <div key={delivery.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
+                  <div>
+                    <p className="font-medium">{delivery.drNumber}</p>
+                    <p className="text-sm text-muted-foreground">{delivery.clientName}</p>
+                  </div>
+                  <Badge className="capitalize bg-sky-100 text-sky-800 hover:bg-sky-100">
+                    {delivery.status.replace(/-/g, ' ')}
+                  </Badge>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl">
+          <CardHeader>
+            <CardTitle>Quick Status Update</CardTitle>
+            <CardDescription>Jump straight to logistics actions</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Button className="w-full bg-[#C0392B] text-white hover:bg-[#A93226]" onClick={() => navigate('/logistics')}>
+              Open Logistics Workspace
+            </Button>
+            <p className="text-sm text-muted-foreground">
+              Update delivery progress, confirm status changes, and upload proof of delivery.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+
+  const renderDashboard = () => {
+    switch (effectiveRole) {
+      case 'president':
+        return renderPresidentDashboard();
+      case 'admin':
+        return renderAdminDashboard();
+      case 'project_manager':
+        return renderProjectManagerDashboard();
+      case 'sales_agent':
+        return renderSalesAgentDashboard();
+      case 'engineer':
+        return renderEngineerDashboard();
+      case 'paint_chemist':
+        return renderPaintChemistDashboard();
+      case 'warehouse_staff':
+        return renderWarehouseDashboard();
+      case 'delivery_guy':
+        return renderDeliveryDashboard();
+      default:
+        return renderAdminDashboard();
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <p className="text-muted-foreground">
+            {getRoleLabel(effectiveRole)} for {user?.name || 'your account'}
+          </p>
+        </div>
+        <Badge variant="outline" className="w-fit capitalize">
+          {effectiveRole.replace(/_/g, ' ')}
+        </Badge>
+      </div>
+
+      {renderDashboard()}
     </div>
   );
 }

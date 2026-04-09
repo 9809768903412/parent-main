@@ -24,15 +24,15 @@ export default function ClientInvoicesPage() {
   const [search, setSearch] = useState('');
 
   useEffect(() => {
-    if (!user?.clientId) return;
+    if (!user?.id) return;
     apiClient
-      .get('/orders', { params: { clientId: user.clientId } })
+      .get('/orders')
       .then((res) => {
         const payload = res.data?.data || res.data || [];
         setOrders(payload);
       })
       .catch(() => setOrders([]));
-  }, [user?.clientId]);
+  }, [user?.id]);
 
   const filtered = orders.filter((o) =>
     [o.orderNumber, o.clientName, o.projectName].some((v) =>

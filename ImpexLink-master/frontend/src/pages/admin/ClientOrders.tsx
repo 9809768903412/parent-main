@@ -699,28 +699,28 @@ export default function ClientOrdersPage() {
                   )}
                 </div>
               )}
-              {selectedOrder.chequeVerification && (
+              {(selectedOrder.poMatchStatus || selectedOrder.chequeVerification) && (
                 <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
-                  {selectedOrder.chequeVerification === 'genuine' ? (
+                  {(selectedOrder.poMatchStatus || selectedOrder.chequeVerification) === 'genuine' ? (
                     <>
                       <CheckCircle className="text-green-600" size={20} />
-                      <span className="text-green-700 font-medium">Cheque Verified - Genuine</span>
+                      <span className="text-green-700 font-medium">Purchase Order Match Confirmed</span>
                     </>
                   ) : (
                     <>
                       <XCircle className="text-red-600" size={20} />
-                      <span className="text-red-700 font-medium">Cheque Alert - Potential Fraud</span>
+                      <span className="text-red-700 font-medium">Purchase Order Mismatch Detected</span>
                     </>
                   )}
                 </div>
               )}
-              {selectedOrder.chequeImage && (
+              {(selectedOrder.poDocumentUrl || selectedOrder.chequeImage) && (
                 <div className="rounded-lg border p-3 space-y-2">
-                  <p className="text-sm font-medium">Payment Proof</p>
-                  {selectedOrder.chequeImage.toLowerCase().endsWith('.pdf') ? (
+                  <p className="text-sm font-medium">Uploaded Purchase Order</p>
+                  {(selectedOrder.poDocumentUrl || selectedOrder.chequeImage || '').toLowerCase().endsWith('.pdf') ? (
                     <a
                       className="text-sm text-primary underline"
-                      href={selectedOrder.chequeImage}
+                      href={selectedOrder.poDocumentUrl || selectedOrder.chequeImage}
                       target="_blank"
                       rel="noreferrer"
                     >
@@ -728,8 +728,8 @@ export default function ClientOrdersPage() {
                     </a>
                   ) : (
                     <img
-                      src={selectedOrder.chequeImage}
-                      alt="Payment proof"
+                      src={selectedOrder.poDocumentUrl || selectedOrder.chequeImage}
+                      alt="Uploaded purchase order"
                       className="w-full max-w-md rounded border"
                     />
                   )}

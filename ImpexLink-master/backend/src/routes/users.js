@@ -4,18 +4,25 @@ const prisma = require('../utils/prisma');
 const { parsePagination, buildPaginatedResponse } = require('../utils/pagination');
 const crypto = require('crypto');
 const { sendVerificationEmail } = require('../utils/mailer');
-const { requireAuth } = require('../middleware/auth');
+const { requireAuth, requireRole, getRoleList } = require('../middleware/auth');
 const { isEmail, isNonEmptyString } = require('../utils/validate');
 
 const router = express.Router();
 
 router.use(requireAuth);
 
-function requireAdmin(req, res, next) {
-  if (req.user?.role !== 'ADMIN') {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
-  return next();
+const requireAdmin = requireRole(['ADMIN']);
+
+function getPrimaryRole(user) {
+  return (
+    user.role?.roleName?.toLowerCase() ||
+    user.userRoles?.map((ur) => ur.role?.roleName?.toLowerCase()).filter(Boolean)[0] ||
+    'client'
+  );
+}
+
+function requestHasRole(req, role) {
+  return getRoleList(req.user).includes(String(role).toUpperCase());
 }
 
 router.get('/', requireAdmin, async (req, res, next) => {
@@ -49,7 +56,7 @@ router.get('/', requireAdmin, async (req, res, next) => {
       id: user.userId.toString(),
       name: user.fullName,
       email: user.email,
-      role: user.role?.roleName?.toLowerCase() || 'staff',
+      role: getPrimaryRole(user),
       roles: user.userRoles
         ? user.userRoles.map((ur) => ur.role?.roleName?.toLowerCase()).filter(Boolean)
         : [],
@@ -81,7 +88,7 @@ router.get('/me', async (req, res, next) => {
       id: user.userId.toString(),
       name: user.fullName,
       email: user.email,
-      role: user.role?.roleName?.toLowerCase() || 'staff',
+      role: getPrimaryRole(user),
       roles: user.userRoles
         ? user.userRoles.map((ur) => ur.role?.roleName?.toLowerCase()).filter(Boolean)
         : [],
@@ -241,8 +248,7 @@ router.put('/me', async (req, res, next) => {
         },
       });
 
-      const role = String(req.user?.role || '').toUpperCase();
-      if (email && role === 'CLIENT') {
+      if (email && requestHasRole(req, 'CLIENT')) {
         await tx.client.updateMany({
           where: { email: current?.email },
           data: { email },
@@ -359,7 +365,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       id: user.userId.toString(),
       name: user.fullName,
       email: user.email,
-      role: user.role?.roleName?.toLowerCase() || 'staff',
+      role: getPrimaryRole(user),
       status: user.status,
       phone: user.phone || null,
       avatarUrl: user.avatarUrl || null,
@@ -408,7 +414,7 @@ router.post('/:id/roles', requireAdmin, async (req, res, next) => {
       id: updated.userId.toString(),
       name: updated.fullName,
       email: updated.email,
-      role: updated.role?.roleName?.toLowerCase() || 'staff',
+      role: getPrimaryRole(updated),
       roles: updated.userRoles.map((ur) => ur.role?.roleName?.toLowerCase()).filter(Boolean),
       status: updated.status,
       phone: updated.phone || null,

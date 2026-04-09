@@ -7,7 +7,7 @@ const { isEmail, isNonEmptyString } = require('../utils/validate');
 const router = express.Router();
 router.use(requireAuth);
 
-router.get('/', requireRole(['ADMIN', 'STAFF']), async (req, res, next) => {
+router.get('/', requireRole(['ADMIN', 'WAREHOUSE_STAFF']), async (req, res, next) => {
   try {
     const pagination = parsePagination(req.query);
     const q = req.query.q ? String(req.query.q) : '';

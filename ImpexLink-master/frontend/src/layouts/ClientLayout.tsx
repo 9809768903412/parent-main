@@ -1,4 +1,4 @@
-import { ReactNode, useEffect } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Logo } from '@/components/Logo';
@@ -21,23 +21,26 @@ import {
   Truck,
   FolderKanban,
   Bell,
+  Phone,
+  Mail,
+  ChevronUp,
+  ChevronDown,
   User,
   LogOut,
   Menu,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useResource } from '@/hooks/use-resource';
-import type { Notification } from '@/types';
+import type { Client, Notification } from '@/types';
 
 interface ClientLayoutProps {
   children: ReactNode;
 }
 
 const navItems = [
-  { path: '/client', icon: LayoutDashboard, label: 'Dashboard', exact: true },
-  { path: '/client/order', icon: ShoppingCart, label: 'Place Order' },
-  { path: '/client/orders', icon: Package, label: 'My Orders' },
-  { path: '/client/deliveries', icon: Truck, label: 'My Deliveries' },
+  { path: '/client', icon: LayoutDashboard, label: 'Home', exact: true },
+  { path: '/client/order', icon: ShoppingCart, label: 'Catalog' },
+  { path: '/client/orders', icon: Package, label: 'Orders & Deliveries' },
   { path: '/client/projects', icon: FolderKanban, label: 'Projects' },
   { path: '/client/notifications', icon: Bell, label: 'Notifications' },
 ];
@@ -45,6 +48,7 @@ const navItems = [
 export default function ClientLayout({ children }: ClientLayoutProps) {
   const { user, logout } = useAuth();
   const location = useLocation();
+  const [supportOpen, setSupportOpen] = useState(false);
 
   const { data: notificationsRaw } = useResource<any>(
     '/notifications',
@@ -58,6 +62,7 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
     : Array.isArray(notificationsRaw?.data)
       ? notificationsRaw.data
       : [];
+  const { data: clients } = useResource<Client[]>('/clients', [], [user?.id], 15_000);
   const { data: companyInfo } = useResource('/company', {
     name: 'Impex Engineering and Industrial Supply',
     address: '6959 Washington St., Pio Del Pilar, Makati City',
@@ -67,6 +72,10 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
     website: 'www.impex.ph',
   });
   const unreadNotifications = notifications.filter((n) => !n.read).length;
+  const displayCompanyName =
+    clients.find((client) => client.id === user?.clientId)?.name ||
+    clients[0]?.name ||
+    user?.companyName;
 
   useEffect(() => {
     if (!companyInfo) return;
@@ -80,13 +89,13 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
   return (
     <div className="min-h-screen flex flex-col bg-background">
       {/* Top Navigation */}
-      <header className="h-16 bg-card border-b border-border sticky top-0 z-50">
+      <header className="h-14 bg-card border-b border-border sticky top-0 z-50">
         <div className="container mx-auto h-full flex items-center justify-between px-4">
           {/* Logo */}
           <Logo size="md" />
 
           {/* Desktop Navigation */}
-          <nav className="hidden xl:flex items-center gap-2 flex-wrap">
+          <nav className="hidden xl:flex items-center gap-1.5 flex-wrap">
             {navItems.map((item) => (
               <NavLink
                 key={item.path}
@@ -94,14 +103,14 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
                 end={item.exact}
                 className={({ isActive }) =>
                   cn(
-                    'flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors',
+                    'flex items-center gap-2 px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors',
                     isActive
                       ? 'bg-primary text-primary-foreground'
                       : 'text-foreground/80 hover:bg-muted hover:text-foreground'
                   )
                 }
               >
-                <item.icon size={18} />
+                <item.icon size={16} />
                 <span>{item.label}</span>
                 {item.label === 'Notifications' && unreadNotifications > 0 && (
                   <Badge className="ml-1 bg-secondary text-secondary-foreground text-xs px-1.5 py-0">
@@ -117,16 +126,16 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
             {/* User dropdown */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="gap-2">
-                  <Avatar className="h-8 w-8">
+                <Button variant="ghost" className="gap-2 px-2">
+                  <Avatar className="h-7 w-7">
                     {user?.avatarUrl && <AvatarImage src={user.avatarUrl} alt={user.name || 'User'} />}
-                    <AvatarFallback className="bg-primary/10 text-primary text-sm">
+                    <AvatarFallback className="bg-primary/10 text-primary text-xs">
                       {user?.avatar || 'U'}
                     </AvatarFallback>
                   </Avatar>
                   <div className="hidden sm:block text-left">
-                    <p className="text-sm font-medium">{user?.name}</p>
-                    <p className="text-xs text-muted-foreground">{user?.companyName}</p>
+                    <p className="text-[13px] font-medium leading-tight">{user?.name}</p>
+                    <p className="text-xs text-muted-foreground">{displayCompanyName}</p>
                   </div>
                 </Button>
               </DropdownMenuTrigger>
@@ -134,7 +143,7 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
                 <DropdownMenuLabel>
                   <div>
                     <p className="font-medium">{user?.name}</p>
-                    <p className="text-xs text-muted-foreground">{user?.companyName}</p>
+                    <p className="text-xs text-muted-foreground">{displayCompanyName}</p>
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -155,8 +164,8 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
             {/* Mobile menu */}
             <Sheet>
               <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" className="xl:hidden">
-                  <Menu size={20} />
+                <Button variant="ghost" size="icon" className="xl:hidden h-9 w-9">
+                  <Menu size={18} />
                 </Button>
               </SheetTrigger>
               <SheetContent side="right" className="w-64">
@@ -191,10 +200,33 @@ export default function ClientLayout({ children }: ClientLayoutProps) {
 
       {/* Page content */}
       <main className="flex-1">
-        <div className="container mx-auto p-4 lg:p-6">
+        <div className="container mx-auto p-4 pb-28 lg:p-6 lg:pb-32">
           {children}
         </div>
       </main>
+
+      <div className="fixed bottom-4 right-4 z-40 w-[260px] rounded-2xl border bg-card/95 shadow-lg backdrop-blur sm:bottom-6 sm:right-6">
+        <button
+          type="button"
+          onClick={() => setSupportOpen((prev) => !prev)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left"
+        >
+          <span className="text-sm font-semibold">Need help?</span>
+          {supportOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+        </button>
+        {supportOpen ? (
+          <div className="space-y-2 border-t px-4 py-3">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Phone size={14} className="shrink-0" />
+              <span>{companyInfo.phone}</span>
+            </div>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Mail size={14} className="shrink-0" />
+              <span>{companyInfo.email}</span>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       {/* Footer */}
       <footer className="bg-card border-t border-border py-4">
