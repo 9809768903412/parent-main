@@ -58,7 +58,7 @@ export default function MyOrdersPage() {
         : 'my-orders'
   );
   const { data: projects } = useResource<Project[]>('/projects', []);
-  const { data: deliveries } = useResource<Delivery[]>('/deliveries', []);
+  const { data: deliveries, reload: reloadDeliveries } = useResource<Delivery[]>('/deliveries', []);
 
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [trackingDelivery, setTrackingDelivery] = useState<Delivery | null>(null);
@@ -145,26 +145,32 @@ export default function MyOrdersPage() {
     },
     {
       label: 'Order Approved',
-      date: ['approved', 'processing', 'shipped', 'delivered'].includes(order.status) ? order.updatedAt : null,
-      active: ['approved', 'processing', 'shipped', 'delivered'].includes(order.status),
+      date: ['approved', 'processing', 'ready-for-delivery', 'delivered'].includes(order.status) ? order.updatedAt : null,
+      active: ['approved', 'processing', 'ready-for-delivery', 'delivered'].includes(order.status),
       tone: 'bg-green-600',
     },
     {
       label: 'Prepared / Processing',
-      date: ['processing', 'shipped', 'delivered'].includes(order.status) ? order.updatedAt : null,
-      active: ['processing', 'shipped', 'delivered'].includes(order.status),
+      date: ['processing', 'ready-for-delivery', 'delivered'].includes(order.status) ? order.updatedAt : null,
+      active: ['processing', 'ready-for-delivery', 'delivered'].includes(order.status),
       tone: 'bg-blue-600',
     },
     {
-      label: 'Dispatched',
-      date: delivery?.issuedAt || null,
-      active: Boolean(delivery),
+      label: 'Ready for Delivery',
+      date: ['ready-for-delivery', 'delivered'].includes(order.status) ? order.updatedAt : null,
+      active: ['ready-for-delivery', 'delivered'].includes(order.status),
       tone: 'bg-blue-600',
+    },
+    {
+      label: 'In Transit',
+      date: delivery?.status === 'in-transit' || delivery?.status === 'delivered' ? delivery?.issuedAt || null : null,
+      active: delivery?.status === 'in-transit' || delivery?.status === 'delivered',
+      tone: 'bg-sky-600',
     },
     {
       label: 'Delivered',
       date: delivery?.receivedAt || null,
-      active: delivery?.status === 'delivered',
+      active: delivery?.status === 'delivered' || order.status === 'delivered',
       tone: 'bg-green-600',
     },
   ];
@@ -177,8 +183,8 @@ export default function MyOrdersPage() {
         return <Badge className="bg-info text-info-foreground gap-1"><CheckCircle size={12} />Approved</Badge>;
       case 'processing':
         return <Badge className="bg-info text-info-foreground gap-1"><Package size={12} />Processing</Badge>;
-      case 'shipped':
-        return <Badge className="bg-secondary gap-1"><Truck size={12} />Shipped</Badge>;
+      case 'ready-for-delivery':
+        return <Badge className="bg-secondary gap-1"><Truck size={12} />Ready for Delivery</Badge>;
       case 'delivered':
         return <Badge className="bg-success text-success-foreground gap-1"><CheckCircle size={12} />Delivered</Badge>;
       case 'cancelled':
@@ -381,6 +387,14 @@ export default function MyOrdersPage() {
   useEffect(() => {
     refreshOrders();
   }, [refreshOrders]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      refreshOrders();
+      reloadDeliveries();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [refreshOrders, reloadDeliveries]);
 
   useEffect(() => {
     const requestedTab =
@@ -739,7 +753,7 @@ export default function MyOrdersPage() {
                         selectedOrder.status === 'pending' && 'bg-warning w-[25%]',
                         selectedOrder.status === 'approved' && 'bg-info w-[35%]',
                         selectedOrder.status === 'processing' && 'bg-info w-[50%]',
-                        selectedOrder.status === 'shipped' && 'bg-secondary w-[75%]',
+                        selectedOrder.status === 'ready-for-delivery' && 'bg-secondary w-[75%]',
                         selectedOrder.status === 'delivered' && 'bg-success w-full'
                       )}
                     />
@@ -747,7 +761,7 @@ export default function MyOrdersPage() {
                   <div className="grid grid-cols-4 text-xs text-muted-foreground">
                     <span className={selectedOrder.status === 'pending' ? 'font-medium text-foreground' : ''}>Pending</span>
                     <span className={selectedOrder.status === 'processing' ? 'font-medium text-foreground' : ''}>Processing</span>
-                    <span className={selectedOrder.status === 'shipped' ? 'font-medium text-foreground' : ''}>Shipped</span>
+                    <span className={selectedOrder.status === 'ready-for-delivery' ? 'font-medium text-foreground' : ''}>Ready</span>
                     <span className={selectedOrder.status === 'delivered' ? 'font-medium text-foreground' : ''}>Delivered</span>
                   </div>
                 </div>

@@ -36,7 +36,7 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Search, Eye, CheckCircle, XCircle, FileText, MessageSquare, Download } from 'lucide-react';
-import type { Order, OrderStatus, QuoteRequest } from '@/types';
+import type { Order, OrderStatus, QuoteRequest, User } from '@/types';
 import { toast } from '@/hooks/use-toast';
 import { useResource } from '@/hooks/use-resource';
 import { apiClient } from '@/api/client';
@@ -53,7 +53,7 @@ const statusColors: Record<OrderStatus, string> = {
   pending: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300',
   approved: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300',
   processing: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-300',
-  shipped: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-300',
+  'ready-for-delivery': 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-300',
   delivered: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300',
   cancelled: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300',
 };
@@ -64,6 +64,8 @@ export default function ClientOrdersPage() {
   const roleInput = user?.roles?.length ? user.roles : user?.role;
   const canManageOrders = canManageClientOrders(roleInput);
   const isAdmin = Array.isArray(roleInput) ? roleInput.includes('admin') : roleInput === 'admin';
+  const isSalesAgent = Array.isArray(roleInput) ? roleInput.includes('sales_agent') : roleInput === 'sales_agent';
+  const isWarehouseStaff = Array.isArray(roleInput) ? roleInput.includes('warehouse_staff') : roleInput === 'warehouse_staff';
   const [orders, setOrders] = useState<Order[]>(() => getCache<Order[]>('admin-orders') || []);
   const [ordersTotal, setOrdersTotal] = useState(0);
   const [ordersPage, setOrdersPage] = useState(1);
@@ -73,6 +75,12 @@ export default function ClientOrdersPage() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const { data: quotes, setData: setQuotes } = useResource<QuoteRequest[]>('/quote-requests', []);
+  const { data: users } = useResource<User[]>(
+    isAdmin ? '/users' : '',
+    [],
+    [],
+    15_000
+  );
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -89,6 +97,7 @@ export default function ClientOrdersPage() {
   const [orderLogs, setOrderLogs] = useState<{ id: string; timestamp: string; action: string; details: string }[]>([]);
   const [cancelReasonDraft, setCancelReasonDraft] = useState('Cancelled by admin');
   const [orderActionErrors, setOrderActionErrors] = useState<Record<string, string>>({});
+  const [assignedSalesAgentDraft, setAssignedSalesAgentDraft] = useState<string>('unassigned');
   const selectedTotals = selectedOrder
     ? calcTotalsFromItems(
         selectedOrder.items.map((item) => ({ quantity: item.quantity, unitPrice: item.unitPrice }))
@@ -164,6 +173,10 @@ export default function ClientOrdersPage() {
   const tableColSpan = 6 + Number(visibleCols.project) + Number(visibleCols.payment) + Number(visibleCols.date);
 
   const pendingQuotes = quotes.filter((q) => q.status === 'pending');
+  const salesAgents = users.filter((entry) => {
+    const roles = entry.roles?.length ? entry.roles : [entry.role];
+    return roles.includes('sales_agent');
+  });
 
   useEffect(() => {
     if (!selectedOrder || !isAdmin) {
@@ -182,7 +195,31 @@ export default function ClientOrdersPage() {
   useEffect(() => {
     if (!selectedOrder) return;
     setCancelReasonDraft(selectedOrder.cancelReason || 'Cancelled by admin');
+    setAssignedSalesAgentDraft(selectedOrder.assignedSalesAgentId || 'unassigned');
   }, [selectedOrder]);
+
+  const handleSaveSalesAgentAssignment = async () => {
+    if (!selectedOrder || !isAdmin) return;
+    try {
+      const response = await apiClient.put<Order>(`/orders/${selectedOrder.id}/assignment`, {
+        assignedSalesAgentId: assignedSalesAgentDraft === 'unassigned' ? 'unassigned' : assignedSalesAgentDraft,
+      });
+      setOrders((prev) => prev.map((order) => (order.id === selectedOrder.id ? response.data : order)));
+      setSelectedOrder(response.data);
+      toast({
+        title: 'Assignment saved',
+        description: response.data.assignedSalesAgentName
+          ? `Assigned to ${response.data.assignedSalesAgentName}.`
+          : 'Order is now unassigned.',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'Unable to save assignment',
+        description: error?.response?.data?.error || 'Please try again.',
+        variant: 'destructive',
+      });
+    }
+  };
 
   const handleUpdateOrderStatus = (orderId: string, newStatus: OrderStatus, reason?: string) => {
     if (newStatus === 'cancelled' && (!reason || !reason.trim())) {
@@ -300,8 +337,14 @@ export default function ClientOrdersPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-foreground">Client Orders & Quotes</h2>
-          <p className="text-muted-foreground">Manage client orders and respond to quote requests</p>
+          <h2 className="text-2xl font-bold text-foreground">
+            {isSalesAgent && !isAdmin ? 'My Client Orders & Quotes' : 'Client Orders & Quotes'}
+          </h2>
+          <p className="text-muted-foreground">
+            {isSalesAgent && !isAdmin
+              ? 'Orders and quote requests assigned to you'
+              : 'Manage client orders and respond to quote requests'}
+          </p>
         </div>
         {lastUpdated && (
           <p className="text-xs text-muted-foreground">
@@ -355,7 +398,7 @@ export default function ClientOrdersPage() {
                     <SelectItem value="pending">Pending</SelectItem>
                     <SelectItem value="approved">Approved</SelectItem>
                     <SelectItem value="processing">Processing</SelectItem>
-                    <SelectItem value="shipped">Shipped</SelectItem>
+                    <SelectItem value="ready-for-delivery">Ready for Delivery</SelectItem>
                     <SelectItem value="delivered">Delivered</SelectItem>
                     <SelectItem value="cancelled">Cancelled</SelectItem>
                   </SelectContent>
@@ -442,7 +485,7 @@ export default function ClientOrdersPage() {
                   <SelectContent>
                     <SelectItem value="approved">Approved</SelectItem>
                     <SelectItem value="processing">Processing</SelectItem>
-                    <SelectItem value="shipped">Shipped</SelectItem>
+                    <SelectItem value="ready-for-delivery">Ready for Delivery</SelectItem>
                     <SelectItem value="delivered">Delivered</SelectItem>
                   </SelectContent>
                 </Select>
@@ -740,6 +783,41 @@ export default function ClientOrdersPage() {
                   Cancelled: {selectedOrder.cancelReason || 'No reason provided'}
                 </div>
               )}
+              {isAdmin && (
+                <div className="rounded-lg border p-3 space-y-3">
+                  <div>
+                    <p className="text-sm font-medium">Assign to Sales Agent</p>
+                    <p className="text-xs text-muted-foreground">
+                      Only admin can manage manual assignment for order ownership.
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <Select value={assignedSalesAgentDraft} onValueChange={setAssignedSalesAgentDraft}>
+                      <SelectTrigger className="sm:flex-1">
+                        <SelectValue placeholder="Select sales agent" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="unassigned">Unassigned</SelectItem>
+                        {salesAgents.map((agent) => (
+                          <SelectItem key={agent.id} value={agent.id}>
+                            {agent.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      onClick={handleSaveSalesAgentAssignment}
+                      disabled={assignedSalesAgentDraft === (selectedOrder.assignedSalesAgentId || 'unassigned')}
+                    >
+                      Save
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Current assignment: {selectedOrder.assignedSalesAgentName || 'Unassigned'}
+                  </p>
+                </div>
+              )}
               {canManageOrders && selectedOrder.status === 'pending' && (
                 <div className="rounded-lg border p-3 space-y-2">
                   <p className="text-sm font-medium">Cancellation reason</p>
@@ -784,15 +862,17 @@ export default function ClientOrdersPage() {
                     >
                       Reject
                     </Button>
+                  {(isAdmin || isSalesAgent) && (
                     <Button
                       className="bg-emerald-600 hover:bg-emerald-700 text-white"
                       onClick={() => handleUpdateOrderStatus(selectedOrder.id, 'approved')}
                     >
                       Approve
                     </Button>
-                  </>
-                )}
-                {canManageOrders && selectedOrder.status === 'approved' && (
+                  )}
+                </>
+              )}
+                {canManageOrders && (isAdmin || isWarehouseStaff) && selectedOrder.status === 'approved' && (
                   <Button
                     className="bg-emerald-600 hover:bg-emerald-700 text-white"
                     onClick={() => handleUpdateOrderStatus(selectedOrder.id, 'processing')}
@@ -800,12 +880,12 @@ export default function ClientOrdersPage() {
                     Start Processing
                   </Button>
                 )}
-                {canManageOrders && selectedOrder.status === 'processing' && (
+                {canManageOrders && (isAdmin || isWarehouseStaff) && selectedOrder.status === 'processing' && (
                   <Button
                     className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                    onClick={() => handleUpdateOrderStatus(selectedOrder.id, 'shipped')}
+                    onClick={() => handleUpdateOrderStatus(selectedOrder.id, 'ready-for-delivery')}
                   >
-                    Mark as Shipped
+                    Mark Ready for Delivery
                   </Button>
                 )}
               </div>

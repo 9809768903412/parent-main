@@ -18,6 +18,7 @@ function includeRequestRelations() {
     project: true,
     requester: true,
     approver: true,
+    assignedProjectManager: true,
     items: {
       include: {
         product: {
@@ -53,7 +54,10 @@ async function canAccessProject(req, projectId) {
 function canApproveRequest(req, request) {
   if (hasRole(req, 'ADMIN')) return true;
   if (hasRole(req, 'PROJECT_MANAGER')) {
-    return request.project?.assignedPmId === req.user.userId;
+    return (
+      request.assignedProjectManagerId === req.user.userId ||
+      request.project?.assignedPmId === req.user.userId
+    );
   }
   if (hasRole(req, 'PAINT_CHEMIST')) {
     return areAllPaintItems(request);
@@ -72,7 +76,7 @@ function getRequestScopeWhere(req) {
   const scopes = [];
 
   if (hasRole(req, 'PROJECT_MANAGER')) {
-    scopes.push({ project: { assignedPmId: req.user.userId } });
+    scopes.push({ assignedProjectManagerId: req.user.userId });
   }
 
   if (hasRole(req, 'ENGINEER')) {
@@ -113,6 +117,8 @@ function mapRequest(r) {
     requestedById: r.requestedBy?.toString() || null,
     approvedBy: r.approver?.fullName || null,
     approvedById: r.approvedBy?.toString() || null,
+    assignedProjectManagerId: r.assignedProjectManagerId?.toString() || null,
+    assignedProjectManagerName: r.assignedProjectManager?.fullName || null,
     approvedAt: r.approvedAt ? r.approvedAt.toISOString() : null,
     date: r.requestDate.toISOString(),
     items: r.items.map((item) => ({
@@ -243,11 +249,17 @@ router.post('/', requireRole(['ADMIN', 'PROJECT_MANAGER', 'ENGINEER', 'PAINT_CHE
       return res.status(403).json({ error: 'Paint chemists can only request paint and consumable items' });
     }
 
+    const project = await prisma.project.findUnique({
+      where: { projectId: Number(projectId) },
+      select: { assignedPmId: true },
+    });
+
     const request = await prisma.materialRequest.create({
       data: {
         requestNumber,
         projectId: Number(projectId),
         requestedBy: req.user.userId,
+        assignedProjectManagerId: project?.assignedPmId || null,
         urgency: urgency ? urgency.toUpperCase() : 'NORMAL',
         estCost,
         purpose: purpose || null,

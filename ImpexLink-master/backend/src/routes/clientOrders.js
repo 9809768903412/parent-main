@@ -19,8 +19,42 @@ function hasRole(req, role) {
   return getRoleList(req.user).includes(String(role).toUpperCase());
 }
 
+function normalizeOrderStatusForResponse(status) {
+  const normalized = String(status || 'PENDING').toUpperCase();
+  if (normalized === 'SHIPPED') return 'ready-for-delivery';
+  return normalized.toLowerCase();
+}
+
+function normalizeOrderStatusForWrite(status) {
+  const normalized = String(status || '').toUpperCase().replace(/-/g, '_');
+  if (normalized === 'READY_FOR_DELIVERY') return 'SHIPPED';
+  return normalized;
+}
+
+function canTransitionOrder(req, currentStatus, requestedStatus) {
+  if (!requestedStatus || requestedStatus === currentStatus) return true;
+  if (hasRole(req, 'ADMIN')) return true;
+
+  if (hasRole(req, 'SALES_AGENT')) {
+    return currentStatus === 'PENDING' && ['APPROVED', 'CANCELLED'].includes(requestedStatus);
+  }
+
+  if (hasRole(req, 'WAREHOUSE_STAFF')) {
+    return (
+      (currentStatus === 'APPROVED' && requestedStatus === 'PROCESSING') ||
+      (currentStatus === 'PROCESSING' && requestedStatus === 'SHIPPED')
+    );
+  }
+
+  if (hasRole(req, 'CLIENT')) {
+    return false;
+  }
+
+  return false;
+}
+
 async function buildOrderRoleScope(req) {
-  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT') || hasRole(req, 'ENGINEER')) {
+  if (hasRole(req, 'ADMIN') || hasRole(req, 'PRESIDENT') || hasRole(req, 'ENGINEER') || hasRole(req, 'WAREHOUSE_STAFF')) {
     return {};
   }
 
@@ -54,7 +88,7 @@ async function buildOrderRoleScope(req) {
   }
 
   if (hasRole(req, 'SALES_AGENT')) {
-    scopes.push({ createdBy: req.user.userId });
+    scopes.push({ assignedSalesAgentId: req.user.userId });
   }
 
   if (hasRole(req, 'PROJECT_MANAGER')) {
@@ -68,18 +102,25 @@ async function buildOrderRoleScope(req) {
   return scopes.length === 1 ? scopes[0] : { OR: scopes };
 }
 
-async function resolveDefaultDriverId() {
-  const driver = await prisma.user.findFirst({
-    where: {
-      deletedAt: null,
-      OR: [
-        { role: { roleName: 'DELIVERY_GUY' } },
-        { userRoles: { some: { role: { roleName: 'DELIVERY_GUY' } } } },
-      ],
-    },
-    orderBy: { userId: 'asc' },
+async function validateSalesAgentAssignment(assignedSalesAgentId) {
+  if (!assignedSalesAgentId) return null;
+  const salesAgent = await prisma.user.findUnique({
+    where: { userId: Number(assignedSalesAgentId) },
+    include: { role: true, userRoles: { include: { role: true } } },
   });
-  return driver?.userId || null;
+  if (!salesAgent || salesAgent.deletedAt) {
+    throw new Error('Assigned sales agent not found');
+  }
+  const roleNames = [
+    salesAgent.role?.roleName,
+    ...(salesAgent.userRoles || []).map((entry) => entry.role?.roleName),
+  ]
+    .filter(Boolean)
+    .map((role) => String(role).toUpperCase());
+  if (!roleNames.includes('SALES_AGENT')) {
+    throw new Error('Assigned user must have the Sales Agent role');
+  }
+  return salesAgent.userId;
 }
 
 const paymentDir = path.join(__dirname, '..', '..', 'uploads', 'payments');
@@ -104,6 +145,41 @@ const upload = multer({
     cb(null, true);
   },
 });
+
+function mapOrder(o) {
+  return {
+    id: o.clientOrderId.toString(),
+    orderNumber: o.orderNumber,
+    clientId: o.clientId?.toString() || null,
+    clientName: o.client?.clientName || 'Client',
+    projectId: o.projectId?.toString() || null,
+    projectName: o.project?.projectName || null,
+    items: (o.items || []).map((item) => ({
+      itemId: item.productId?.toString() || '',
+      itemName: item.product?.itemName || '',
+      unit: item.product?.unit || '',
+      quantity: item.quantity,
+      unitPrice: Number(item.unitPrice || 0),
+      amount: Number(item.unitPrice || 0) * item.quantity,
+    })),
+    subtotal: Number(o.subtotal || 0),
+    vat: Number(o.vat || 0),
+    total: Number(o.total || 0),
+    status: normalizeOrderStatusForResponse(o.status),
+    paymentStatus: String(o.paymentStatus || 'PENDING').toLowerCase(),
+    chequeImage: o.paymentProofUrl || null,
+    chequeVerification: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
+    poDocumentUrl: o.paymentProofUrl || null,
+    poMatchStatus: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
+    createdAt: o.createdAt.toISOString(),
+    updatedAt: o.updatedAt.toISOString(),
+    createdBy: o.createdBy?.toString() || null,
+    assignedSalesAgentId: o.assignedSalesAgentId?.toString() || null,
+    assignedSalesAgentName: o.assignedSalesAgent?.fullName || null,
+    specialInstructions: o.specialInstructions || '',
+    cancelReason: o.cancelReason || null,
+  };
+}
 
 router.get('/', async (req, res, next) => {
   try {
@@ -152,6 +228,7 @@ router.get('/', async (req, res, next) => {
         include: {
           project: true,
           client: true,
+          assignedSalesAgent: true,
           items: { include: { product: true } },
         },
         where,
@@ -162,36 +239,7 @@ router.get('/', async (req, res, next) => {
       prisma.clientOrder.count({ where }),
     ]);
 
-    const data = orders.map((o) => ({
-      id: o.clientOrderId.toString(),
-      orderNumber: o.orderNumber,
-      clientId: o.clientId?.toString() || null,
-      clientName: o.client?.clientName || 'Client',
-      projectId: o.projectId?.toString() || null,
-      projectName: o.project?.projectName || null,
-      items: o.items.map((item) => ({
-        itemId: item.productId?.toString() || '',
-        itemName: item.product?.itemName || '',
-        unit: item.product?.unit || '',
-        quantity: item.quantity,
-        unitPrice: Number(item.unitPrice || 0),
-        amount: Number(item.unitPrice || 0) * item.quantity,
-      })),
-      subtotal: Number(o.subtotal || 0),
-      vat: Number(o.vat || 0),
-      total: Number(o.total || 0),
-      status: o.status.toLowerCase(),
-      paymentStatus: o.paymentStatus.toLowerCase(),
-      chequeImage: o.paymentProofUrl || null,
-      chequeVerification: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
-      poDocumentUrl: o.paymentProofUrl || null,
-      poMatchStatus: o.chequeVerification ? o.chequeVerification.toLowerCase() : null,
-      createdAt: o.createdAt.toISOString(),
-      updatedAt: o.updatedAt.toISOString(),
-      createdBy: o.createdBy?.toString() || null,
-      specialInstructions: o.specialInstructions || '',
-      cancelReason: o.cancelReason || null,
-    }));
+    const data = orders.map(mapOrder);
 
     if (pagination) {
       return res.json(buildPaginatedResponse(data, total, pagination.page, pagination.pageSize));
@@ -232,12 +280,22 @@ router.post('/', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, re
       const access = await resolveClientAccess(prisma, req.user.userId);
       resolvedClientId = access?.client?.clientId || null;
     }
+    if (req.body.assignedSalesAgentId !== undefined && !hasRole(req, 'ADMIN')) {
+      return res.status(403).json({ error: 'Only admin can assign a sales agent' });
+    }
+    const assignedSalesAgentId =
+      req.body.assignedSalesAgentId === undefined
+        ? null
+        : req.body.assignedSalesAgentId === 'unassigned'
+        ? null
+        : await validateSalesAgentAssignment(req.body.assignedSalesAgentId);
 
     const order = await prisma.clientOrder.create({
       data: {
         orderNumber,
         clientId: resolvedClientId,
         projectId: projectId ? Number(projectId) : null,
+        assignedSalesAgentId,
         subtotal,
         vat,
         total,
@@ -298,7 +356,57 @@ router.post('/', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, re
   }
 });
 
-router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, res, next) => {
+router.put('/:id/assignment', requireRole(['ADMIN']), async (req, res, next) => {
+  try {
+    const orderId = Number(req.params.id);
+    const existing = await prisma.clientOrder.findUnique({
+      where: { clientOrderId: orderId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const assignedSalesAgentId =
+      req.body.assignedSalesAgentId === undefined
+        ? existing.assignedSalesAgentId
+        : req.body.assignedSalesAgentId === 'unassigned'
+        ? null
+        : await validateSalesAgentAssignment(req.body.assignedSalesAgentId);
+
+    await prisma.clientOrder.update({
+      where: { clientOrderId: orderId },
+      data: { assignedSalesAgentId },
+    });
+
+    const responseOrder = await prisma.clientOrder.findUnique({
+      where: { clientOrderId: orderId },
+      include: {
+        project: true,
+        client: true,
+        assignedSalesAgent: true,
+        items: { include: { product: true } },
+      },
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId: req.user.userId,
+        action: 'UPDATE',
+        target: 'ClientOrderAssignment',
+        details: `Updated sales agent assignment for ${responseOrder.orderNumber}`,
+      },
+    });
+
+    res.json(mapOrder(responseOrder));
+  } catch (err) {
+    if (err.message?.includes('Assigned')) {
+      return res.status(400).json({ error: err.message });
+    }
+    next(err);
+  }
+});
+
+router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'WAREHOUSE_STAFF', 'CLIENT']), async (req, res, next) => {
   try {
     if (hasRole(req, 'CLIENT')) {
       const access = await resolveClientAccess(prisma, req.user.userId);
@@ -359,12 +467,15 @@ router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, 
       if (!scopedOrder) {
         return res.status(404).json({ error: 'Order not found' });
       }
-      if (scopedOrder.createdBy !== req.user.userId) {
+      if (scopedOrder.assignedSalesAgentId !== req.user.userId) {
         return res.status(403).json({ error: 'Forbidden' });
       }
     }
+    if (req.body.assignedSalesAgentId !== undefined && !hasRole(req, 'ADMIN')) {
+      return res.status(403).json({ error: 'Only admin can change the assigned sales agent' });
+    }
 
-    const status = req.body.status ? req.body.status.toUpperCase() : undefined;
+    const status = req.body.status ? normalizeOrderStatusForWrite(req.body.status) : undefined;
     if (status && !['PENDING', 'APPROVED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'].includes(status)) {
       return res.status(400).json({ error: 'Invalid status' });
     }
@@ -383,19 +494,29 @@ router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, 
       include: { items: { include: { product: true } } },
     });
     if (!existing) return res.status(404).json({ error: 'Order not found' });
+    if (status && !canTransitionOrder(req, existing.status, status)) {
+      return res.status(403).json({ error: 'You cannot move this order to that stage.' });
+    }
+    const assignedSalesAgentId =
+      req.body.assignedSalesAgentId === undefined
+        ? undefined
+        : req.body.assignedSalesAgentId === 'unassigned'
+        ? null
+        : await validateSalesAgentAssignment(req.body.assignedSalesAgentId);
 
-    const order = await prisma.clientOrder.update({
+    await prisma.clientOrder.update({
       where: { clientOrderId: Number(req.params.id) },
       data: {
         status,
         paymentStatus: req.body.paymentStatus ? req.body.paymentStatus.toUpperCase() : undefined,
         cancelReason: cancelReason || undefined,
+        assignedSalesAgentId,
       },
     });
 
     const nextStatus = (status || order.status).toUpperCase();
     const shouldDeduct = ['APPROVED', 'PROCESSING'].includes(nextStatus);
-    const shouldCreateDelivery = ['APPROVED', 'PROCESSING', 'SHIPPED'].includes(nextStatus);
+    const shouldCreateDelivery = ['SHIPPED', 'DELIVERED'].includes(nextStatus);
     if (shouldDeduct) {
       const existingIssue = await prisma.stockTransaction.findFirst({
         where: {
@@ -453,7 +574,7 @@ router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, 
           data: {
             drNumber,
             clientOrderId: order.clientOrderId,
-            assignedDriverId: await resolveDefaultDriverId(),
+            assignedDeliveryGuyId: null,
             status: nextStatus === 'SHIPPED' ? 'IN_TRANSIT' : 'PENDING',
             itemsCount: existing.items?.length || 0,
             eta: defaultEta,
@@ -525,7 +646,17 @@ router.put('/:id', requireRole(['ADMIN', 'SALES_AGENT', 'CLIENT']), async (req, 
       },
     });
 
-    res.json(order);
+    const responseOrder = await prisma.clientOrder.findUnique({
+      where: { clientOrderId: Number(req.params.id) },
+      include: {
+        project: true,
+        client: true,
+        assignedSalesAgent: true,
+        items: { include: { product: true } },
+      },
+    });
+
+    res.json(mapOrder(responseOrder));
   } catch (err) {
     next(err);
   }

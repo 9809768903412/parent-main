@@ -58,7 +58,7 @@ const orderBadgeClasses: Record<string, string> = {
   pending: 'bg-yellow-100 text-yellow-800',
   approved: 'bg-blue-100 text-blue-800',
   processing: 'bg-indigo-100 text-indigo-800',
-  shipped: 'bg-sky-100 text-sky-800',
+  'ready-for-delivery': 'bg-sky-100 text-sky-800',
   delivered: 'bg-emerald-100 text-emerald-800',
   cancelled: 'bg-red-100 text-red-800',
 };

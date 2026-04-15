@@ -83,7 +83,13 @@ export interface Project {
 }
 
 // Order Types
-export type OrderStatus = 'pending' | 'approved' | 'processing' | 'shipped' | 'delivered' | 'cancelled';
+export type OrderStatus =
+  | 'pending'
+  | 'approved'
+  | 'processing'
+  | 'ready-for-delivery'
+  | 'delivered'
+  | 'cancelled';
 export type PaymentStatus = 'pending' | 'verified' | 'paid' | 'failed';
 
 export interface OrderItem {
@@ -103,6 +109,8 @@ export interface Order {
   clientName: string;
   projectId?: string;
   projectName?: string;
+  assignedSalesAgentId?: string | null;
+  assignedSalesAgentName?: string | null;
   items: OrderItem[];
   subtotal: number;
   vat: number;
@@ -131,6 +139,8 @@ export interface MaterialRequest {
   projectName: string;
   requestedBy: string;
   requestedById: string;
+  assignedProjectManagerId?: string | null;
+  assignedProjectManagerName?: string | null;
   date: string;
   items: OrderItem[];
   purpose: string;
@@ -201,8 +211,8 @@ export interface Delivery {
   proofOfDelivery?: string;
   notes?: string;
   returnRejectionReason?: string | null;
-  assignedDriverId?: string | null;
-  driverName?: string | null;
+  assignedDeliveryGuyId?: string | null;
+  deliveryGuyName?: string | null;
 }
 
 // Quote Request Types

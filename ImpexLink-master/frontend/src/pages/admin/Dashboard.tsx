@@ -125,7 +125,7 @@ export default function StaffDashboard() {
   const needsRequests = ['admin', 'project_manager', 'engineer', 'paint_chemist', 'warehouse_staff', 'president'].includes(effectiveRole);
   const needsInventory = ['admin', 'engineer', 'paint_chemist', 'warehouse_staff'].includes(effectiveRole);
   const needsProjects = ['president', 'project_manager', 'engineer'].includes(effectiveRole);
-  const needsOrders = ['president', 'admin', 'project_manager', 'sales_agent', 'engineer'].includes(effectiveRole);
+  const needsOrders = ['president', 'admin', 'project_manager', 'sales_agent', 'engineer', 'warehouse_staff'].includes(effectiveRole);
   const needsDeliveries = ['president', 'delivery_guy'].includes(effectiveRole);
   const needsTransactions = ['warehouse_staff'].includes(effectiveRole);
   const needsQuotes = ['admin', 'sales_agent'].includes(effectiveRole);
@@ -167,10 +167,13 @@ export default function StaffDashboard() {
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
     .slice(0, 5);
 
-  const myOrders = orders.filter((order) => order.createdBy === user?.id);
+  const myOrders = orders.filter((order) => order.assignedSalesAgentId === user?.id);
   const myRequests = requests.filter((request) => request.requestedById === user?.id);
   const engineerVisibleRequests = requests;
-  const pendingQuotes = quotes.filter((quote) => quote.status === 'pending');
+  const myOrderPipeline = myOrders.filter((order) => ['pending', 'approved', 'processing', 'ready-for-delivery'].includes(order.status));
+  const warehouseOrders = orders
+    .filter((order) => ['approved', 'processing', 'ready-for-delivery'].includes(order.status))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const scopedProjectIds = new Set(projects.map((project) => project.id));
   const pmRequests = requests.filter((request) => scopedProjectIds.has(request.projectId));
   const projectCostOverview = projects.slice(0, 5).map((project) => ({
@@ -434,7 +437,7 @@ export default function StaffDashboard() {
         <Card className="rounded-2xl">
           <CardHeader>
             <CardTitle>My Client Orders</CardTitle>
-            <CardDescription>Orders you created or currently manage</CardDescription>
+            <CardDescription>Orders manually assigned to you</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {myOrders.length === 0 ? (
@@ -458,22 +461,22 @@ export default function StaffDashboard() {
         <div className="space-y-6">
           <Card className="rounded-2xl">
             <CardHeader>
-              <CardTitle>Pending Quotes</CardTitle>
-              <CardDescription>Quotation requests waiting for action</CardDescription>
+              <CardTitle>Assigned Order Queue</CardTitle>
+              <CardDescription>Orders currently waiting on your sales follow-through</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {pendingQuotes.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No pending quotes right now.</p>
+              {myOrderPipeline.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No assigned orders in the active queue right now.</p>
               ) : (
-                pendingQuotes.slice(0, 4).map((quote) => (
-                  <div key={quote.id} className="rounded-xl border px-4 py-3">
-                    <p className="font-medium">{quote.clientName}</p>
-                    <p className="text-sm text-muted-foreground">{quote.projectName || 'General request'}</p>
+                myOrderPipeline.slice(0, 4).map((order) => (
+                  <div key={order.id} className="rounded-xl border px-4 py-3">
+                    <p className="font-medium">{order.orderNumber}</p>
+                    <p className="text-sm text-muted-foreground">{order.clientName} • {order.status.replace(/-/g, ' ')}</p>
                   </div>
                 ))
               )}
               <Button variant="ghost" className="w-full" onClick={() => navigate('/admin/orders')}>
-                Open Quotes
+                Open Orders
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             </CardContent>
@@ -482,17 +485,21 @@ export default function StaffDashboard() {
           <Card className="rounded-2xl">
             <CardHeader>
               <CardTitle>Client Activity</CardTitle>
-              <CardDescription>Recent account movement from your order book</CardDescription>
+              <CardDescription>Recent movement from your assigned accounts</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {myOrders.slice(0, 4).map((order) => (
-                <div key={order.id} className="rounded-xl border px-4 py-3">
-                  <p className="font-medium">{order.clientName}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {order.projectName || 'No project'} • {formatPeso(order.total)}
-                  </p>
-                </div>
-              ))}
+              {myOrders.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No assigned client activity yet.</p>
+              ) : (
+                myOrders.slice(0, 4).map((order) => (
+                  <div key={order.id} className="rounded-xl border px-4 py-3">
+                    <p className="font-medium">{order.clientName}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {order.projectName || 'No project'} • {formatPeso(order.total)}
+                    </p>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
         </div>
@@ -627,16 +634,20 @@ export default function StaffDashboard() {
         <div className="space-y-6">
           <Card className="rounded-2xl">
             <CardHeader>
-              <CardTitle>Pending Material Requests</CardTitle>
-              <CardDescription>Warehouse queue needing fulfillment</CardDescription>
+              <CardTitle>Order Processing Queue</CardTitle>
+              <CardDescription>Orders currently waiting on warehouse handling</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {pendingRequests.slice(0, 5).map((request) => (
-                <div key={request.id} className="rounded-xl border px-4 py-3">
-                  <p className="font-medium">{request.requestNumber}</p>
-                  <p className="text-sm text-muted-foreground">{request.projectName}</p>
-                </div>
-              ))}
+              {warehouseOrders.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No orders are waiting on warehouse processing right now.</p>
+              ) : (
+                warehouseOrders.slice(0, 5).map((order) => (
+                  <div key={order.id} className="rounded-xl border px-4 py-3">
+                    <p className="font-medium">{order.orderNumber}</p>
+                    <p className="text-sm text-muted-foreground">{order.clientName} • {order.status.replace(/-/g, ' ')}</p>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
 
@@ -646,14 +657,18 @@ export default function StaffDashboard() {
               <CardDescription>Latest stock transactions</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              {transactions.slice(0, 5).map((transaction) => (
-                <div key={transaction.id} className="rounded-xl border px-4 py-3">
-                  <p className="font-medium capitalize">{transaction.type}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {transaction.date} • Balance {transaction.newBalance}
-                  </p>
-                </div>
-              ))}
+              {transactions.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No stock movement recorded yet.</p>
+              ) : (
+                transactions.slice(0, 5).map((transaction) => (
+                  <div key={transaction.id} className="rounded-xl border px-4 py-3">
+                    <p className="font-medium capitalize">{transaction.type}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {transaction.date} • Balance {transaction.newBalance}
+                    </p>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
         </div>
@@ -666,12 +681,12 @@ export default function StaffDashboard() {
       <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
         <Card className="rounded-2xl">
           <CardHeader>
-            <CardTitle>My Assigned Deliveries</CardTitle>
+            <CardTitle>Delivery Queue</CardTitle>
             <CardDescription>Current logistics queue for dispatch and transit updates</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {activeDeliveries.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No active deliveries assigned right now.</p>
+              <p className="text-sm text-muted-foreground">No active deliveries right now.</p>
             ) : (
               activeDeliveries.slice(0, 8).map((delivery) => (
                 <div key={delivery.id} className="flex items-center justify-between rounded-xl border px-4 py-3">
@@ -734,9 +749,7 @@ export default function StaffDashboard() {
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
-          <p className="text-muted-foreground">
-            {getRoleLabel(effectiveRole)} for {user?.name || 'your account'}
-          </p>
+          <p className="text-muted-foreground">{getRoleLabel(effectiveRole)}</p>
         </div>
         <Badge variant="outline" className="w-fit capitalize">
           {effectiveRole.replace(/_/g, ' ')}

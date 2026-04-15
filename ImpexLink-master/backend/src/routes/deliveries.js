@@ -41,24 +41,10 @@ function hasRole(req, role) {
   return getRoleList(req.user).includes(String(role).toUpperCase());
 }
 
-async function resolveDefaultDriverId() {
-  const driver = await prisma.user.findFirst({
-    where: {
-      deletedAt: null,
-      OR: [
-        { role: { roleName: 'DELIVERY_GUY' } },
-        { userRoles: { some: { role: { roleName: 'DELIVERY_GUY' } } } },
-      ],
-    },
-    orderBy: { userId: 'asc' },
-  });
-  return driver?.userId || null;
-}
-
-async function validateDriverAssignment(assignedDriverId) {
-  if (!assignedDriverId) return null;
+async function validateDeliveryGuyAssignment(assignedDeliveryGuyId) {
+  if (!assignedDeliveryGuyId) return null;
   const driver = await prisma.user.findUnique({
-    where: { userId: Number(assignedDriverId) },
+    where: { userId: Number(assignedDeliveryGuyId) },
     include: { role: true, userRoles: { include: { role: true } } },
   });
   if (!driver || driver.deletedAt) {
@@ -96,11 +82,11 @@ async function buildDeliveryScope(req) {
   }
 
   if (roleList.includes('SALES_AGENT')) {
-    scopes.push({ clientOrder: { createdBy: req.user.userId } });
+    scopes.push({ clientOrder: { assignedSalesAgentId: req.user.userId } });
   }
 
   if (roleList.includes('DELIVERY_GUY')) {
-    scopes.push({ assignedDriverId: req.user.userId });
+    return {};
   }
 
   if (scopes.length === 0) {
@@ -136,8 +122,8 @@ function mapDelivery(d) {
     notes: d.notes || null,
     returnRejectionReason: d.returnRejectionReason || null,
     proofOfDelivery: d.proofOfDeliveryUrl || null,
-    assignedDriverId: d.assignedDriverId?.toString() || null,
-    driverName: d.assignedDriver?.fullName || null,
+    assignedDeliveryGuyId: d.assignedDeliveryGuyId?.toString() || null,
+    deliveryGuyName: d.assignedDeliveryGuy?.fullName || null,
   };
 }
 
@@ -161,7 +147,7 @@ router.get('/', async (req, res, next) => {
                 { drNumber: { contains: q, mode: 'insensitive' } },
                 { clientOrder: { orderNumber: { contains: q, mode: 'insensitive' } } },
                 { clientOrder: { client: { clientName: { contains: q, mode: 'insensitive' } } } },
-                { assignedDriver: { fullName: { contains: q, mode: 'insensitive' } } },
+                { assignedDeliveryGuy: { fullName: { contains: q, mode: 'insensitive' } } },
               ],
             }
           : {},
@@ -176,7 +162,7 @@ router.get('/', async (req, res, next) => {
     const [deliveries, total] = await Promise.all([
       prisma.delivery.findMany({
         include: {
-          assignedDriver: true,
+          assignedDeliveryGuy: true,
           clientOrder: {
             include: {
               client: true,
@@ -223,20 +209,16 @@ router.post('/', requireRole(['ADMIN', 'WAREHOUSE_STAFF']), async (req, res, nex
     }
 
     const defaultEta = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
-    const requestedDriverId = req.body.assignedDriverId === 'unassigned' ? null : req.body.assignedDriverId;
-    const assignedDriverId = requestedDriverId
-      ? await validateDriverAssignment(requestedDriverId)
-      : await resolveDefaultDriverId();
     const delivery = await prisma.delivery.create({
       data: {
         drNumber,
         clientOrderId: Number(clientOrderId),
-        assignedDriverId,
+        assignedDeliveryGuyId: null,
         status: status ? status.toUpperCase().replace('-', '_') : 'PENDING',
         eta: eta ? new Date(eta) : defaultEta,
         itemsCount,
       },
-      include: { assignedDriver: true, clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } } },
+      include: { assignedDeliveryGuy: true, clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } } },
     });
 
     await prisma.auditLog.create({
@@ -275,19 +257,14 @@ router.put('/:id', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), as
     const existing = await prisma.delivery.findUnique({
       where: { deliveryId: Number(req.params.id) },
       include: {
-        assignedDriver: true,
+        assignedDeliveryGuy: true,
         clientOrder: { include: { client: true, items: { include: { product: true } }, project: true } },
       },
     });
     if (!existing) return res.status(404).json({ error: 'Delivery not found' });
 
-    if (hasRole(req, 'DELIVERY_GUY') && !hasRole(req, 'ADMIN')) {
-      if (!existing.assignedDriverId || existing.assignedDriverId !== req.user.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
-      if (req.body.assignedDriverId !== undefined) {
-        return res.status(403).json({ error: 'Assigned driver can only be changed by admin or warehouse staff' });
-      }
+    if (req.body.assignedDeliveryGuyId !== undefined) {
+      return res.status(400).json({ error: 'Delivery assignment is disabled in the single-driver workflow' });
     }
 
     const currentStatus = existing.status;
@@ -302,7 +279,7 @@ router.put('/:id', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), as
         return res.status(400).json({ error: `Invalid status transition: ${currentStatus} -> ${requestedStatus}` });
       }
       if (requestedStatus === 'IN_TRANSIT' && existing.clientOrder?.status !== 'SHIPPED') {
-        return res.status(400).json({ error: 'Order must be shipped before dispatching delivery.' });
+        return res.status(400).json({ error: 'Order must be ready for delivery before dispatching.' });
       }
       if (requestedStatus === 'DELIVERED' && !req.body.receivedBy) {
         return res.status(400).json({ error: 'Received by is required' });
@@ -315,16 +292,9 @@ router.put('/:id', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), as
       }
     }
 
-    let assignedDriverId = undefined;
-    if (req.body.assignedDriverId !== undefined) {
-      const requestedDriverId = req.body.assignedDriverId === 'unassigned' ? null : req.body.assignedDriverId;
-      assignedDriverId = requestedDriverId ? await validateDriverAssignment(requestedDriverId) : null;
-    }
-
     const delivery = await prisma.delivery.update({
       where: { deliveryId: Number(req.params.id) },
       data: {
-        assignedDriverId,
         status: requestedStatus || undefined,
         eta: req.body.eta ? new Date(req.body.eta) : undefined,
         receivedBy: req.body.receivedBy,
@@ -334,7 +304,7 @@ router.put('/:id', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY']), as
         returnRejectionReason: req.body.returnRejectionReason,
       },
       include: {
-        assignedDriver: true,
+        assignedDeliveryGuy: true,
         clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } },
       },
     });
@@ -538,11 +508,6 @@ router.post('/:id/proof', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY
       where: { deliveryId: Number(req.params.id) },
     });
     if (!existing) return res.status(404).json({ error: 'Delivery not found' });
-    if (hasRole(req, 'DELIVERY_GUY') && !hasRole(req, 'ADMIN')) {
-      if (!existing.assignedDriverId || existing.assignedDriverId !== req.user.userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
-    }
     if (!req.file) {
       return res.status(400).json({ error: 'Proof file is required' });
     }
@@ -552,7 +517,7 @@ router.post('/:id/proof', requireRole(['ADMIN', 'WAREHOUSE_STAFF', 'DELIVERY_GUY
       where: { deliveryId: existing.deliveryId },
       data: { proofOfDeliveryUrl: proofPath },
       include: {
-        assignedDriver: true,
+        assignedDeliveryGuy: true,
         clientOrder: { include: { client: true, project: true, items: { include: { product: true } } } },
       },
     });

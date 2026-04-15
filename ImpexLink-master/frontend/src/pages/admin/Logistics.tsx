@@ -69,6 +69,7 @@ export default function LogisticsPage() {
   const roleInput = user?.roles?.length ? user.roles : user?.role;
   const canManage = canManageLogistics(roleInput);
   const isAdmin = Array.isArray(roleInput) ? roleInput.includes('admin') : roleInput === 'admin';
+  const isDeliveryGuy = Array.isArray(roleInput) ? roleInput.includes('delivery_guy') : roleInput === 'delivery_guy';
   const [deliveries, setDeliveries] = useState<Delivery[]>(
     () => getCache<Delivery[]>('deliveries') || []
   );
@@ -324,6 +325,9 @@ export default function LogisticsPage() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold text-foreground">Logistics & Deliveries</h2>
+        {isDeliveryGuy && !isAdmin && (
+          <p className="text-muted-foreground">Only deliveries assigned to you are shown here.</p>
+        )}
       </div>
 
       <div className="space-y-4">

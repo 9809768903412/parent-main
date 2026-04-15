@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { format } from 'date-fns';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -29,6 +29,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLocation } from 'react-router-dom';
 import { VAT_RATE } from '@/lib/vat';
+import { formatCurrency, formatNumber } from '@/lib/utils';
 import PaginationNav from '@/components/PaginationNav';
 
 const statusColors = {
@@ -256,6 +257,34 @@ export default function ProjectsPage() {
     }
     return '';
   };
+
+  const projectFormStaffOptions = useMemo(() => {
+    const names = new Set<string>();
+    const addName = (value?: string | null) => {
+      const trimmed = String(value || '').trim();
+      if (trimmed) names.add(trimmed);
+    };
+
+    users.forEach((entry) => {
+      const roleList = entry.roles?.length ? entry.roles : entry.role ? [entry.role] : [];
+      if (roleList.some((role) => role !== 'client')) {
+        addName(entry.name);
+      }
+    });
+
+    addName(user?.name);
+    addName(selectedProject?.assignedPmName);
+    addName(projectFormData.requestedBy);
+    addName(projectFormData.checkedBy);
+
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [
+    users,
+    user?.name,
+    selectedProject?.assignedPmName,
+    projectFormData.requestedBy,
+    projectFormData.checkedBy,
+  ]);
 
   const buildProjectFormSeed = (project?: Project | null, current?: Partial<ProjectFormDraft>): ProjectFormDraft => {
     const client = project ? clients.find((entry) => entry.id === project.clientId) : null;
@@ -544,9 +573,9 @@ export default function ProjectsPage() {
             <table><thead><tr><th>Qty</th><th>Unit</th><th>Description</th></tr></thead><tbody>${renderRows(form.toolsEquipmentOthers)}</tbody></table>
           </div>
           <div class="totals">
-            <div><span>Subtotal</span><strong>PHP ${form.subtotal.toFixed(2)}</strong></div>
-            <div><span>VAT (${Math.round(VAT_RATE * 100)}%)</span><strong>PHP ${form.vat.toFixed(2)}</strong></div>
-            <div><span>Total Project Cost</span><strong>PHP ${form.totalCost.toFixed(2)}</strong></div>
+            <div><span>Subtotal</span><strong>${formatCurrency(form.subtotal)}</strong></div>
+            <div><span>VAT (${Math.round(VAT_RATE * 100)}%)</span><strong>${formatCurrency(form.vat)}</strong></div>
+            <div><span>Total Project Cost</span><strong>${formatCurrency(form.totalCost)}</strong></div>
           </div>
           <div class="sign">
             <div><strong>Requested By:</strong> ${form.requestedBy}</div>
@@ -963,7 +992,7 @@ export default function ProjectsPage() {
                     </div>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {stats.orderCount} orders • ₱{stats.totalValue.toLocaleString()}
+                    {formatNumber(stats.orderCount)} orders • {formatCurrency(stats.totalValue, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                   </div>
                 </CardContent>
               </Card>
@@ -1021,8 +1050,8 @@ export default function ProjectsPage() {
                       </span>
                     </p>
                     <p>Location: <span className="font-medium">{getProjectLocation(selectedProject)}</span></p>
-                    <p>Orders: <span className="font-medium">{getProjectStats(selectedProject.id).orderCount}</span></p>
-                    <p>Total Value: <span className="font-medium">₱{getProjectStats(selectedProject.id).totalValue.toLocaleString()}</span></p>
+                    <p>Orders: <span className="font-medium">{formatNumber(getProjectStats(selectedProject.id).orderCount)}</span></p>
+                    <p>Total Value: <span className="font-medium">{formatCurrency(getProjectStats(selectedProject.id).totalValue, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span></p>
                   </CardContent>
                 </Card>
               </div>
